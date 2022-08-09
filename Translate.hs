@@ -1,78 +1,112 @@
-module Trans where
+{-# LANGUAGE GADTs #-}
+module Translate where
 
 import InstrSet
 import SimpleCore
 
 import Data.Maybe (catMaybes)
+import Control.Monad.State
 
-{-
-tTrans :: Expr -> Block
-tTrans (Simple (CAp con args)) = Block [] (Return (CTag con) (map argTrans args))
+newtype HeapState = HeapState
+  { size :: Int
+  }
+
+initHeap = HeapState {size = 0}
+
+alloc :: String -> State HeapState Name
+alloc base
+  = do heap <- get
+       let n = base ++ "_" ++ show (size heap)
+       put $ heap { size = size heap + 1 }
+       return n
+
+allocInstr :: Instr a -> State HeapState a
+allocInstr (Store tag args) = alloc "h"
+allocInstr (PushCaf n) = alloc "caf"
+allocInstr (IPrimOp op x y) = alloc "prim"
+allocInstr (Constant n) = alloc "n"
+allocInstr (ICall call cont)
+  = do c  <- alloc "c"
+       h1 <- alloc "arg" -- TODO we don't know ahead of time how many (used) args our node will have.
+       h2 <- alloc "arg" -- for now, just return a hard coded maximum
+       h3 <- alloc "arg" -- for now, just return a hard coded maximum
+       h4 <- alloc "arg" -- for now, just return a hard coded maximum
+       return (CTag c, [h1,h2,h3,h4])
+allocInstr (Force call cont) = alloc "h"
+
+clausify :: Instr a -> State HeapState (a, Instr a)
+clausify rhs = do lhs <- allocInstr rhs
+                  pure (lhs, rhs)
+
+translate :: [TExpr] -> [(Name, Func)]
+translate prog = evalState (traverse topTrans prog) initHeap
+
+topTrans :: TExpr -> State HeapState (Name, Func)
+topTrans (Fun f args body) = do blk <- tTrans body
+                                return (name f, IFun args blk)
+topTrans (Caf g      body) = do blk <- tTrans body
+                                return (g     , ICaf blk)
+
+tTrans :: Expr -> State HeapState Block
+tTrans (Simple (CAp con args)) = pure $ Terminate $ Return (CTag con) args
 tTrans (Simple (FAp f args))
-  | length args < arity f = Block [] (Return (PartialFTag f (arity f - length args)) (map argTrans args))
-  | otherwise             = let (e',  cont) = eTrans (FAp f args)
-                            in Block [] (uncurry Jump (eTrans (FAp f args)))
-tTrans (Simple s) = Block [] (uncurry Jump (eTrans s))
-tTrans (Let  (Binding x s) e) = consBlock (Store x $ vTrans s) (tTrans e)
-tTrans (LetS (Binding x s) e) = consBlock (Store x $ sTrans s) (tTrans e)
+  | length args < arity f = pure $ Terminate $ Return (PartialFTag f (arity f - length args)) args
+  | otherwise             = pure $ Terminate $ uncurry Jump (eTrans (FAp f args))
+tTrans (Simple s) = pure $ Terminate  $ uncurry Jump (eTrans s)
+tTrans (Let  (Binding x s) e) = do s' <- vTrans s x
+                                   e' <- tTrans e
+                                   pure $ s' e'
+tTrans (LetS (Binding x s) e) = do e' <- tTrans e
+                                   pure $ (x, sTrans s) :> e'
 tTrans (Case s alts) = case (catMaybes $ map matchAlt alts) of
-                             -- [(con, args, e)]  -> ICall (CTag con) args e NOp
+                             -- [(con, args, e)]  -> Terminate $ ICall (CTag con) args e NOp
                              -- TODO implement unambiguous scrutinee optimisations
-                             []                -> uncurry ICase (eTrans s) (map altTrans alts)
-tTrans (If cmp x y) = IIf cmp (tTrans x) (tTrans y)
-
-vTrans :: SExpr -> [Instr]
-vTrans (CafAp n args)
-  | length args == 0 = [PushCaf n n] -- TODO are we sure?
-  | otherwise        = [PushCaf n' n, Store n' (FTag (n', -99)) (map argTrans args)]
-      where n' = n ++ "'"
-vTrans (FAp   n args)
-  | arity n >  length args = [Store "TODO" (PartialFTag n (arity n - length args)) (map argTrans args)]
-  | arity n == length args = [Store "TODO" (FTag n) (map argTrans args)]
-  | otherwise              = (Store (fst h) (FTag n) (map argTrans $ take (arity n) args))
-                             : vTrans (FAp h (drop (arity n) args))
-     where h = let (f, arity) = n
-               in (f++"'", arity)
-vTrans (VAp   n args)  = [Store "TODO" (FTag (n,(-99))) (map argTrans args)]
-vTrans (Proj  n field var) = [Store "TODO" (CTag $ "sel_" ++ n ++ show field) [argTrans var]] -- Is Store meant to take a continuation? Would make more sense... need to use Select here
-
-sTrans :: SExpr -> Instr
-sTrans (Int n) = Constant n
-sTrans (POp pn [x,y]) = IPrimOp "TODO" pn x y
-sTrans (CAp cn args) = Store "TODO" (CTag cn) (map argTrans args)
-sTrans (VAp vn args) = uncurry (Force "TODO") (eTrans $ VAp vn args)
-sTrans (Proj cn field vn) = uncurry (Force "TODO") (eTrans $ Proj cn field vn)
-sTrans (FAp f args)
-  | arity f <= length args = uncurry (Force "TODO") (eTrans $ FAp f args)
-  | otherwise               = Store "TODO" (PartialFTag f (arity f - length args)) (map argTrans args)
-sTrans x = uncurry (Force "TODO") (eTrans x)
+                             []                -> do alts' <- traverse altTrans alts
+                                                     pure $ Terminate $ uncurry ICase (eTrans s) alts'
+tTrans (If cmp x y) = do x' <- tTrans x
+                         y' <- tTrans y
+                         pure $ Terminate $ IIf cmp x' y'
 
 matchAlt :: Alt -> Maybe ()
 matchAlt _ = Nothing
 
-altTrans :: Alt -> IAlt
-altTrans (Alt cn args e) = IAlt (CTag cn) (map argTrans args) (tTrans e)
--}
+altTrans :: Alt -> State HeapState IAlt
+altTrans (Alt cn args e) = do e' <- tTrans e
+                              pure $ IAlt (CTag cn) args e'
 
+-- Translate a lazy subexpression
+vTrans :: SExpr -> Name -> State HeapState (Block -> Block)
+vTrans (CafAp n args) lhs
+  | length args == 0 = pure $ \rest -> (lhs, PushCaf n) :> rest
+  | otherwise        = do (h, i) <- clausify (PushCaf n)
+                          let i' = Store (FTag (h, length args)) (h:args)
+                          pure $ \rest -> (h,i) :> (lhs, i') :> rest
+     -- TODO Really don't know how to interpret the F_AP. Don't think I need names in tags?
+     -- Should _all_ names have an associated arity?
+vTrans (FAp n args) lhs
+  | arity n >  length args = pure $ \rest -> (lhs, Store (PartialFTag n (arity n - length args)) args) :> rest
+  | arity n == length args = pure $ \rest -> (lhs, Store (FTag n) args) :> rest
+  | otherwise              = do (h,i) <- clausify (Store (FTag n) (take (arity n) args))
+                                let i' = Store (FTag (h, length args - arity n)) (h : drop (arity n) args)
+                                pure $ \rest -> (h,i) :> (lhs, i') :> rest
+vTrans (VAp n args) lhs = pure $ \rest -> (lhs, Store (FTag (n,length args)) args) :> rest
+vTrans (Proj n field var) lhs = pure $ \rest -> (lhs, Store (FTag ("sel_" ++ n ++ show field,1)) [var]) :> rest
 
 -- Translate a strict subexpression
-sTrans :: SExpr -> Instr a
+sTrans :: SExpr -> Instr Var
 sTrans (Int n) = Constant n
 sTrans (POp n [x,y]) = IPrimOp n x y
-{-
-sTrans (CAp cn args) = Store "TODO" (CTag cn) (map argTrans args)
-sTrans (VAp vn args) = uncurry (Force "TODO") (eTrans $ VAp vn args)
-sTrans (Proj cn field vn) = uncurry (Force "TODO") (eTrans $ Proj cn field vn)
+sTrans (CAp n args) = Store (CTag n) args
+sTrans (VAp n args) = uncurry Force (eTrans $ VAp n args)
+sTrans (Proj n field x) = uncurry Force (eTrans $ Proj n field x)
 sTrans (FAp f args)
-  | arity f <= length args = uncurry (Force "TODO") (eTrans $ FAp f args)
-  | otherwise               = Store "TODO" (PartialFTag f (arity f - length args)) (map argTrans args)
-sTrans x = uncurry (Force "TODO") (eTrans x)
--}
+  | arity f <= length args = uncurry Force (eTrans $ FAp f args)
+  | otherwise               = Store (PartialFTag f (arity f - length args)) args
+sTrans x = uncurry Force (eTrans x)
 
 -- Translate evaluation expressions
 eTrans :: SExpr -> (Call, Cont)
-eTrans (SVar (Left x)) = (Eval x, NOp)
-eTrans (SVar (Right x)) = error $ "Cannot evaluate primitive ref: " ++ show x
+eTrans (SVar x) = (Eval x, NOp)
 eTrans (Proj _ field x) = (Eval x, Select field)
 eTrans (CafAp n args)
   | length args == 0 = (EvalCaf n, NOp)

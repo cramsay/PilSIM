@@ -1,8 +1,12 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE RankNTypes #-}
 
 module InstrSet where
 
 import SimpleCore
+
+import Control.Monad.State
 
 data Tag       -- Do we need to carry names here?
   = CTag CName
@@ -20,8 +24,11 @@ data Func
   | ICaf        Block
 
 data Block where
-  BlockNil  :: Terminator -> Block
-  BlockCons :: Instr a -> (a -> Block) -> Block
+  Terminate :: Terminator -> Block
+  (:>)      :: forall a. Show a =>
+               (a, Instr a) -> Block -> Block
+
+infixr 6 :>
 
 data Instr ret where
   Store    :: Tag -> [Var]                 -> Instr RefVar
@@ -45,3 +52,18 @@ data Call
   | EvalCaf CafName
   | TLF     FName [Var]
   -- | Fix     FName [Var]
+
+-- We get very iffy from here down!
+
+deriving instance Show Tag
+deriving instance Show Cont
+deriving instance Show Func
+deriving instance Show Terminator
+deriving instance Show IAlt
+deriving instance Show Call
+deriving instance Show (Instr a)
+
+instance Show Block where
+  show = unlines . go
+    where go (Terminate t) = [show t]
+          go ((lhs,rhs) :> rest) = (show lhs ++ " <- " ++ show rhs) : go rest
