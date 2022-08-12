@@ -2,14 +2,9 @@ module SimpleCore where
 
 type Name = String
 
--- We distinguish between "reference" variables and unboxed primitive variables directly.
--- PilGRIM gets this from GHC's type info.
-
-type RefVar = Name
-type PrimVar = Name
+-- Type synonyms for different names
 type Var = Name
-
-type FName = (Name, Int)
+type FName = Name
 type CName = Name
 type CafName = Name
 
@@ -17,10 +12,10 @@ data Expr = Simple SExpr
            | Let Binding Expr
            | LetS Binding Expr
            | Case SExpr [Alt]
-           | If Cmp Expr Expr
-           -- | Fix
-           -- | Try
-           -- | Throw
+           | If PrimCmp Expr Expr
+           | Fix FName [Var]
+           | Try FName [Var] Var
+           | Throw Var
   deriving Show
 
 
@@ -28,10 +23,10 @@ data SExpr = SVar Var
            | Int Int
            | CAp CName [Var]
            | FAp FName [Var]
-           | VAp RefVar [Var]
-           | CafAp CafName [Var] -- Why args here? For function-valued CAFs?
-           | POp PrimOp [PrimVar]
-           | Proj CName Int RefVar
+           | VAp Var   [Var]
+           | CafAp CafName [Var]
+           | POp PrimOp [Var]
+           | Proj CName Int Var
   deriving Show
 
 data Binding = Binding Name SExpr
@@ -46,15 +41,17 @@ data PrimOp = Plus
             -- No exhaustive list given
   deriving Show
 
-data Cmp = CmpInt Expr Expr
+data PrimCmp = CmpInt Expr Expr
   deriving Show
 
 data TExpr = Fun   FName [Var] Expr
            | Caf CafName       Expr
   deriving Show
 
-arity :: FName -> Int
-arity = snd
+fname :: TExpr -> Name
+fname (Fun n _ _) = n
+fname (Caf n   _) = n
 
-name :: FName -> Name
-name = fst
+arity :: TExpr -> Int
+arity (Fun _ args _) = length args
+arity (Caf _      _) = 0

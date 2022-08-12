@@ -11,6 +11,27 @@ coreFoldr = Fun ("foldr", 3) ["f", "a", "xs"] $
                                                (Simple $ VAp "f" ["y", "rs"])
                 ]
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
 coreFoldl  = Fun ("foldl", 3) ["f", "a", "xs"] $
                Case (SVar "xs")
                  [ Alt "Nil"  [         ] $ Simple (SVar "a")

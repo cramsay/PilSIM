@@ -4,23 +4,59 @@ module Translate where
 import InstrSet
 import SimpleCore
 
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Control.Monad.State
 
-newtype HeapState = HeapState
-  { size :: Int
+data TransState = TransState
+  { nextI :: Int -- Generated name counter
+  , arities :: [(FName, Int)]
+  , env     :: [(Name,  Val)]
   }
 
-initHeap = HeapState {size = 0}
+initTrans :: [TExpr] -> TransState
+initTrans fns = TransState
+                  0
+                  (map (\f->(fname f, arity f)) fns)
+                  []
 
-alloc :: String -> State HeapState Name
+alloc :: String -> State TransState Name
 alloc base
-  = do heap <- get
-       let n = base ++ "_" ++ show (size heap)
-       put $ heap { size = size heap + 1 }
+  = do s <- get
+       let n = base ++ "_" ++ show (nextI s)
+       put $ s { nextI = nextI s + 1
+               , env   = (n, Ref n) : env s}
        return n
 
-allocInstr :: Instr a -> State HeapState a
+newPrim :: String -> State TransState Name
+newPrim base
+  = do s <- get
+       let n = base ++ "_" ++ show (nextI s)
+       put $ s { nextI = nextI s + 1
+               , env   = (n, Prim n) : env s}
+       return n
+
+cleanEnv :: TExpr -> State TransState ()
+cleanEnv (Fun _ args _) = do s <- get
+                             let env' = zip args ()
+                             put $ s { env = env' }
+cleanEnv (Caf _      _) = do s <- get
+                             pure $ s { env = [] }
+
+envLookup :: Var -> State TransState Val
+envLookup x = do s <- get
+                 pure $ fromMaybe (error $ "Looked up a name missing from environment: " ++ x)
+                                  (lookup x (env s))
+
+envLookups :: [Var] -> State TransState [Val]
+envLookups = traverse envLookup
+
+arityLookup :: Var -> State TransState Int
+arityLookup f = do s <- get
+                   pure $ fromMaybe (error $ "Looked up a function missing from context: " ++ f)
+                                    (lookup f (arities s))
+
+{-
+allocInstr :: Instr a -> State TransState a
 allocInstr (Store tag args) = alloc "h"
 allocInstr (PushCaf n) = alloc "caf"
 allocInstr (IPrimOp op x y) = alloc "prim"
@@ -34,20 +70,20 @@ allocInstr (ICall call cont)
        return (CTag c, [h1,h2,h3,h4])
 allocInstr (Force call cont) = alloc "h"
 
-clausify :: Instr a -> State HeapState (a, Instr a)
+clausify :: Instr a -> State TransState (a, Instr a)
 clausify rhs = do lhs <- allocInstr rhs
                   pure (lhs, rhs)
 
 translate :: [TExpr] -> [(Name, Func)]
-translate prog = evalState (traverse topTrans prog) initHeap
+translate prog = evalState (traverse topTrans prog) initTrans
 
-topTrans :: TExpr -> State HeapState (Name, Func)
+topTrans :: TExpr -> State TransState (Name, Func)
 topTrans (Fun f args body) = do blk <- tTrans body
                                 return (name f, IFun args blk)
 topTrans (Caf g      body) = do blk <- tTrans body
                                 return (g     , ICaf blk)
 
-tTrans :: Expr -> State HeapState Block
+tTrans :: Expr -> State TransState Block
 tTrans (Simple (CAp con args)) = pure $ Terminate $ Return (CTag con) args
 tTrans (Simple (FAp f args))
   | length args < arity f = pure $ Terminate $ Return (PartialFTag f (arity f - length args)) args
@@ -66,16 +102,19 @@ tTrans (Case s alts) = case (catMaybes $ map matchAlt alts) of
 tTrans (If cmp x y) = do x' <- tTrans x
                          y' <- tTrans y
                          pure $ Terminate $ IIf cmp x' y'
+tTrans (Fix f args) = pure $ Terminate $ Jump (IFix f args) NOp
+tTrans (Try f args h) = pure $ Terminate $ Jump (TLF f args) (ICatch h)
+tTrans (Throw x) = pure $ Terminate $ IThrow x
 
 matchAlt :: Alt -> Maybe ()
 matchAlt _ = Nothing
 
-altTrans :: Alt -> State HeapState IAlt
+altTrans :: Alt -> State TransState IAlt
 altTrans (Alt cn args e) = do e' <- tTrans e
                               pure $ IAlt (CTag cn) args e'
 
 -- Translate a lazy subexpression
-vTrans :: SExpr -> Name -> State HeapState (Block -> Block)
+vTrans :: SExpr -> Name -> State TransState (Block -> Block)
 vTrans (CafAp n args) lhs
   | length args == 0 = pure $ \rest -> (lhs, PushCaf n) :> rest
   | otherwise        = do (h, i) <- clausify (PushCaf n)
@@ -92,11 +131,13 @@ vTrans (FAp n args) lhs
 vTrans (VAp n args) lhs = pure $ \rest -> (lhs, Store (FTag (n,length args)) args) :> rest
 vTrans (Proj n field var) lhs = pure $ \rest -> (lhs, Store (FTag ("sel_" ++ n ++ show field,1)) [var]) :> rest
 
+-}
+
 -- Translate a strict subexpression
-sTrans :: SExpr -> Instr Var
-sTrans (Int n) = Constant n
-sTrans (POp n [x,y]) = IPrimOp n x y
-sTrans (CAp n args) = Store (CTag n) args
+sTrans :: SExpr -> State TransState (Instr Val)
+sTrans (Int n) = pure $ Constant n
+sTrans (POp n [x,y]) = pure $ IPrimOp n x y
+sTrans (CAp n args) = Store (CNode n args)
 sTrans (VAp n args) = uncurry Force (eTrans $ VAp n args)
 sTrans (Proj n field x) = uncurry Force (eTrans $ Proj n field x)
 sTrans (FAp f args)
@@ -105,13 +146,18 @@ sTrans (FAp f args)
 sTrans x = uncurry Force (eTrans x)
 
 -- Translate evaluation expressions
-eTrans :: SExpr -> (Call, Cont)
-eTrans (SVar x) = (Eval x, NOp)
-eTrans (Proj _ field x) = (Eval x, Select field)
+eTrans :: SExpr -> State TransState (Call, Cont)
+eTrans (SVar x) = pure (Eval x, NOp)
+eTrans (Proj _ field x) = pure (Eval x, Select field)
 eTrans (CafAp n args)
-  | length args == 0 = (EvalCaf n, NOp)
-  | otherwise        = (EvalCaf n, Apply args)
+  | length args == 0 = pure (EvalCaf n, NOp)
+  | otherwise        = do vals <- envLookups args
+                          pure (EvalCaf n, Apply vals)
 eTrans (FAp f args)
-  | arity f == length args = (TLF f args, NOp)
-  | otherwise              = (TLF f (take (arity f) args), Apply (drop (arity f) args))
-eTrans (VAp n args)    = (Eval n, Apply args)
+  = do arity <- arityLookup f
+       vals <- envLookups args
+       case arity == length args of
+         True  -> pure (TLF f vals, NOp)
+         False -> pure (TLF f (take arity vals), Apply (drop arity vals))
+eTrans (VAp n args) = do vals <- envLookups args
+                         pure (Eval n, Apply vals)

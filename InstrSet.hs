@@ -6,22 +6,23 @@ module InstrSet where
 
 import SimpleCore
 
-import Control.Monad.State
+data Val = Ref  Var
+         | Prim Int
 
-data Tag       -- Do we need to carry names here?
-  = CTag CName
-  | FTag FName
-  | PartialFTag FName Int
+data Node
+  = CNode    CName     [Val]
+  | FNode    FName     [Val]
+  | PartialF FName Int [Val]
 
 data Cont
   = NOp
-  | Apply [Var]
+  | Apply [Val]
   | Select Int
-  -- | Catch RefVar
+  | ICatch Var
 
 data Func
-  = IFun [Var] Block
-  | ICaf        Block
+  = IFun [Val] Block
+  | ICaf       Block
 
 data Block where
   Terminate :: Terminator -> Block
@@ -31,31 +32,30 @@ data Block where
 infixr 6 :>
 
 data Instr ret where
-  Store    :: Tag -> [Var]                 -> Instr RefVar
-  PushCaf  :: CafName                      -> Instr RefVar
-  IPrimOp  :: PrimOp -> PrimVar -> PrimVar -> Instr PrimVar
-  Constant :: Int                          -> Instr PrimVar
-  ICall    :: Call -> Cont                 -> Instr (Tag, [Var])
-  Force    :: Call -> Cont                 -> Instr RefVar
+  Store    :: Node                 -> Instr Val -- Var
+  PushCaf  :: CafName              -> Instr Val -- Var
+  IPrimOp  :: PrimOp -> Int -> Int -> Instr Val -- Prim
+  Constant :: Int                  -> Instr Val -- Var
+  ICall    :: Call -> Cont         -> Instr Node
+  Force    :: Call -> Cont         -> Instr Val -- Var
 
 data Terminator
-  = Return Tag [Var]
+  = Return Node
   | Jump Call Cont
   | ICase Call Cont [IAlt]
-  | IIf Cmp Block Block
-  -- | Throw RefVar
+  | IIf PrimCmp Block Block
+  | IThrow Var
 
-data IAlt = IAlt Tag [Var] Block
+data IAlt = IAlt Node Block
 
 data Call
-  = Eval RefVar
+  = Eval    Var
   | EvalCaf CafName
-  | TLF     FName [Var]
-  -- | Fix     FName [Var]
+  | TLF     FName [Val]
+  | IFix    FName [Val]
 
--- We get very iffy from here down!
-
-deriving instance Show Tag
+deriving instance Show Node
+deriving instance Show Val
 deriving instance Show Cont
 deriving instance Show Func
 deriving instance Show Terminator
