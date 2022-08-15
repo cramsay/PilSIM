@@ -3,49 +3,28 @@ module Examples where
 import SimpleCore
 import Translate
 
-coreFoldr = Fun ("foldr", 3) ["f", "a", "xs"] $
+coreFoldr = Fun "foldr" ["f", "a", "xs"] $
               Case (SVar "xs")
                 [ Alt "Nil"  [         ] $ Simple (SVar "a")
                 , Alt "Cons" ["y", "ys"] $ Let (Binding "rs" $
-                                                   FAp ("foldr",3) ["f", "a", "ys"])
+                                                   FAp "foldr" ["f", "a", "ys"])
                                                (Simple $ VAp "f" ["y", "rs"])
                 ]
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-coreFoldl  = Fun ("foldl", 3) ["f", "a", "xs"] $
+coreFoldl  = Fun "foldl" ["f", "a", "xs"] $
                Case (SVar "xs")
                  [ Alt "Nil"  [         ] $ Simple (SVar "a")
                  , Alt "Cons" ["y", "ys"] $ Let (Binding "b" $
                                                   (VAp "f" ["a", "y"]))
-                                                (Simple $ FAp ("foldl",3) ["f", "b", "ys"])
+                                                (Simple $ FAp "foldl" ["f", "b", "ys"])
                  ]
 
-coreFoldl' = Fun ("foldl'", 3) ["f", "a", "xs"] $
+coreFoldl' = Fun "foldl'" ["f", "a", "xs"] $
                Case (SVar "xs")
                  [ Alt "Nil"  [         ] $ Simple (SVar "a")
                  , Alt "Cons" ["y", "ys"] $ LetS (Binding "b" $
                                                    (VAp "f" ["a", "y"]))
-                                                 (Simple $ FAp ("foldl'",3) ["f", "b", "ys"])
+                                                 (Simple $ FAp "foldl'" ["f", "b", "ys"])
                  ]
 
 {-

@@ -6,22 +6,19 @@ module InstrSet where
 
 import SimpleCore
 
-data Val = Ref  Var
-         | Prim Int
-
 data Node
-  = CNode    CName     [Val]
-  | FNode    FName     [Val]
-  | PartialF FName Int [Val]
+  = CNode    CName     [Var]
+  | FNode    FName     [Var]
+  | PartialF FName Int [Var]
 
 data Cont
   = NOp
-  | Apply [Val]
+  | Apply [Var]
   | Select Int
   | ICatch Var
 
 data Func
-  = IFun [Val] Block
+  = IFun [Var] Block
   | ICaf       Block
 
 data Block where
@@ -32,12 +29,12 @@ data Block where
 infixr 6 :>
 
 data Instr ret where
-  Store    :: Node                 -> Instr Val -- Var
-  PushCaf  :: CafName              -> Instr Val -- Var
-  IPrimOp  :: PrimOp -> Int -> Int -> Instr Val -- Prim
-  Constant :: Int                  -> Instr Val -- Var
+  Store    :: Node                 -> Instr Var -- Var
+  PushCaf  :: CafName              -> Instr Var -- Var
+  IPrimOp  :: PrimOp -> Var -> Var -> Instr Var -- Prim
+  Constant :: Int                  -> Instr Var -- Var
   ICall    :: Call -> Cont         -> Instr Node
-  Force    :: Call -> Cont         -> Instr Val -- Var
+  Force    :: Call -> Cont         -> Instr Var -- Var
 
 data Terminator
   = Return Node
@@ -51,11 +48,10 @@ data IAlt = IAlt Node Block
 data Call
   = Eval    Var
   | EvalCaf CafName
-  | TLF     FName [Val]
-  | IFix    FName [Val]
+  | TLF     FName [Var]
+  | IFix    FName [Var]
 
 deriving instance Show Node
-deriving instance Show Val
 deriving instance Show Cont
 deriving instance Show Func
 deriving instance Show Terminator
