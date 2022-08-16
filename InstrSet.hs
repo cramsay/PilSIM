@@ -24,7 +24,7 @@ data Func
 data Block where
   Terminate :: Terminator -> Block
   (:>)      :: forall a. Show a =>
-               (a, Instr a) -> Block -> Block
+               Instr a -> (a -> Block) -> Block
 
 infixr 6 :>
 
@@ -52,14 +52,17 @@ data Call
   | IFix    FName [Var]
 
 deriving instance Show Node
+deriving instance Show Call
+deriving instance Show (Instr a)
 deriving instance Show Cont
+{-
 deriving instance Show Func
 deriving instance Show Terminator
 deriving instance Show IAlt
-deriving instance Show Call
-deriving instance Show (Instr a)
 
 instance Show Block where
   show = unlines . go
     where go (Terminate t) = [show t]
           go ((lhs,rhs) :> rest) = (show lhs ++ " <- " ++ show rhs) : go rest
+
+-}

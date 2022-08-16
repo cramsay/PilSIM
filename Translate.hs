@@ -5,149 +5,98 @@ import InstrSet
 import SimpleCore
 
 import Data.Maybe (catMaybes, fromMaybe)
-import Control.Monad.State
 
--- Helpers for our translation state
--- Used for unique naming and looking up arities of global function
+type PartialBlock a = (a -> Block) -> Block
 
-data TransState = TransState
-  { nextI :: Int -- Generated name counter
-  , arities :: [(FName, Int)]
-  }
+cont :: Show a => Instr a -> PartialBlock a
+cont = (:>)
 
-initTrans :: [TExpr] -> TransState
-initTrans fns = TransState
-                  0
-                  (map (\f->(fname f, arity f)) fns)
+iseq :: (Show a, Show b) => Instr a -> (a -> Instr b) -> PartialBlock b
+iseq a f = \rest -> a :> \h -> f h :> rest
 
-alloc :: String -> State TransState Name
-alloc base
-  = do s <- get
-       let n = base ++ "_" ++ show (nextI s)
-       put $ s { nextI = nextI s + 1 }
-       return n
+type ArityMap = [(FName, Int)]
 
-noteArity :: Var -> Int -> State TransState ()
-noteArity f arity
-  = do s <- get
-       put $ s { arities = (f,arity) : arities s }
+getArity :: ArityMap -> Var -> Int
+getArity m f = fromMaybe (error $ "Looked up a function missing from context: " ++ f)
+                         (lookup f m)
 
-arityLookup :: Var -> State TransState Int
-arityLookup f = do s <- get
-                   pure $ fromMaybe (error $ "Looked up a function missing from context: " ++ f)
-                                    (lookup f (arities s))
-
-allocInstr :: Instr a -> State TransState a
-allocInstr (Store node) = alloc "h"
-allocInstr (PushCaf n) = alloc "caf"
-allocInstr (IPrimOp op x y) = alloc "prim"
-allocInstr (Constant n) = alloc "n"
-allocInstr (ICall call cont)
-  = do c  <- alloc "c"
-       h1 <- alloc "arg" -- TODO we don't know ahead of time how many (used) args our node will have.
-       h2 <- alloc "arg" -- for now, just return a hard coded maximum
-       h3 <- alloc "arg" -- for now, just return a hard coded maximum
-       h4 <- alloc "arg" -- for now, just return a hard coded maximum
-       return (CNode c [h1,h2,h3,h4])
-allocInstr (Force call cont) = alloc "h"
-
-clausify :: Instr a -> State TransState (a, Instr a)
-clausify rhs = do lhs <- allocInstr rhs
-                  pure (lhs, rhs)
+toArityMap :: [TExpr] -> ArityMap
+toArityMap = map (\f -> (fname f, arity f))
 
 translate :: [TExpr] -> [(Name, Func)]
-translate prog = evalState (traverse topTrans prog) (initTrans prog)
+translate prog = map (topTrans (toArityMap prog)) prog
 
-topTrans :: TExpr -> State TransState (Name, Func)
-topTrans (Fun f args body) = do blk <- tTrans body
-                                return (f, IFun args blk)
-topTrans (Caf g      body) = do blk <- tTrans body
-                                return (g, ICaf blk)
+topTrans :: ArityMap -> TExpr -> (Name, Func)
+topTrans am (Fun f args body) = (f, IFun args $ tTrans am body)
+topTrans am (Caf g      body) = (g, ICaf      $ tTrans am body)
 
-tTrans :: Expr -> State TransState Block
-tTrans (Simple (CAp con args)) = pure $ Terminate $ Return (CNode con args)
-tTrans (Simple (FAp f args))
-  = do arity <- arityLookup f
-       case length args < arity of
-         True  -> pure $ Terminate $ Return (PartialF f (arity - length args) args)
-         False -> do (call, cont) <- eTrans (FAp f args)
-                     pure $ Terminate $ Jump call cont
-tTrans (Simple s) = do (call, cont) <- eTrans s
-                       pure $ Terminate  $ Jump call cont
-tTrans (Let  (Binding x s) e) = do s' <- vTrans s x
-                                   e' <- tTrans e
-                                   pure $ s' e'
-tTrans (LetS (Binding x s) e) = do e' <- tTrans e
-                                   s' <- sTrans s
-                                   pure $ (x, s') :> e'
-tTrans (Case s alts) = case (catMaybes $ map matchAlt alts) of
-                             -- [(con, args, e)]  -> Terminate $ ICall (CTag con) args e NOp
-                             -- TODO implement unambiguous scrutinee optimisations
-                             []                -> do alts' <- traverse altTrans alts
-                                                     (call, cont) <- eTrans s
-                                                     pure $ Terminate $ ICase call cont alts'
-tTrans (If cmp x y) = do x' <- tTrans x
-                         y' <- tTrans y
-                         pure $ Terminate $ IIf cmp x' y'
-tTrans (Fix f args) = pure $ Terminate $ Jump (IFix f args) NOp
-tTrans (Try f args h) = pure $ Terminate $ Jump (TLF f args) (ICatch h)
-tTrans (Throw x) = pure $ Terminate $ IThrow x
+tTrans :: ArityMap -> Expr -> Block
+tTrans am (Simple (CAp con args))
+  = Terminate $ Return (CNode con args)
+tTrans am (Simple (FAp f args))
+  | length args < arity = Terminate $ Return (PartialF f (arity - length args) args)
+  | otherwise                   = Terminate $ uncurry Jump $ eTrans am (FAp f args)
+  where arity = getArity am f
+tTrans am (Simple s)
+  = Terminate $ uncurry Jump $ eTrans am s
+tTrans am (Let  (Binding x s) e)
+  = vTrans am x s (\v -> tTrans am e)
+tTrans am (LetS (Binding x s) e)
+  = sTrans am x s (\v -> tTrans am e)
+tTrans am (Case s alts) -- TODO implement unambiguous scrutinee optimisation
+  = Terminate $ uncurry ICase (eTrans am s) (map (altTrans am) alts)
+tTrans am (If cmp x y)
+  = Terminate $ IIf cmp (tTrans am x) (tTrans am y)
+tTrans am (Fix f args)
+  = Terminate $ Jump (IFix f args) NOp
+tTrans am (Try f args h)
+  = Terminate $ Jump (TLF f args) (ICatch h)
+tTrans am (Throw x)
+  = Terminate $ IThrow x
 
-matchAlt :: Alt -> Maybe ()
-matchAlt _ = Nothing
+altTrans :: ArityMap -> Alt -> IAlt
+altTrans am (Alt cn args e) = IAlt (CNode cn args) (tTrans am e)
 
-altTrans :: Alt -> State TransState IAlt
-altTrans (Alt cn args e) = do e' <- tTrans e
-                              pure $ IAlt (CNode cn args) e'
-
--- Translate a lazy subexpression
-vTrans :: SExpr -> Name -> State TransState (Block -> Block)
-vTrans (CafAp n args) lhs
-  | length args == 0 = pure $ \rest -> (lhs, PushCaf n) :> rest
-  | otherwise        = do (h, i) <- clausify (PushCaf n)
-                          let i' = Store (FNode h (h:args))
-                          pure $ \rest -> (h,i) :> (lhs, i') :> rest
-     -- TODO Really don't know how to interpret the F_AP. Don't think I need names in tags?
-     -- Should _all_ names have an associated arity?
-vTrans (FAp n args) lhs
-  = do arity <- arityLookup n
-       case compare arity (length args) of
-         GT -> pure $ \rest -> (lhs, Store (PartialF n (arity - length args) args)) :> rest
-         EQ -> pure $ \rest -> (lhs, Store (FNode n args)) :> rest
-         LT -> do (h,i) <- clausify (Store (FNode n (take arity args)))
-                  let i' = Store (FNode h (h : drop arity args))
-                  pure $ \rest -> (h,i) :> (lhs, i') :> rest
-vTrans (VAp n args) lhs = pure $ \rest -> (lhs, Store (FNode n args)) :> rest
-vTrans (Proj n field var) lhs = pure $ \rest -> (lhs, Store (FNode ("sel_" ++ n ++ show field) [var])) :> rest
+-- Translate a lazy subexpression -- TODO What do we do with the x?
+vTrans :: ArityMap -> Var -> SExpr -> PartialBlock Var
+vTrans am x (CafAp n args)
+  | length args == 0 = cont $ PushCaf n
+  | otherwise        = PushCaf n `iseq` \h ->
+                       Store (FNode "ap" (h:args))
+vTrans am x (FAp n args)
+  | arity >  length args = cont $ Store (PartialF n (arity - length args) args)
+  | arity == length args = cont $ Store (FNode n args)
+  | otherwise            = Store (FNode n (take arity args)) `iseq` \h ->
+                           Store (FNode h (h : drop arity args))
+  where arity = getArity am n
+vTrans am x (VAp f args) = cont $ Store (FNode "ap" (f:args))
+vTrans am x (Proj n field var)  -- TODO How do we interpret the "FSel_n" notation? Is that the name of a predefined function?
+  = cont $ Store (FNode n' [var])
+  where n' = "sel_" ++ n
+vTrans am x e = undefined
 
 -- Translate a strict subexpression
-sTrans :: SExpr -> State TransState (Instr Var)
-sTrans (Int n) = pure $ Constant n
-sTrans (POp n [x,y]) = pure $ IPrimOp n x y
-sTrans (CAp n args) = pure $ Store (CNode n args)
-sTrans (VAp n args) = do (call, cont) <- eTrans $ VAp n args
-                         pure $ Force call cont
-sTrans (Proj n field x) = do (call, cont) <- eTrans $ Proj n field x
-                             pure  $ Force call cont
-sTrans (FAp f args)
-  = do arity <- arityLookup f
-       case arity <= length args of
-         True -> do (call, cont) <- eTrans $ FAp f args
-                    pure $ Force call cont
-         False -> pure $ Store (PartialF f (arity - length args) args)
-sTrans x = do (call, cont) <- eTrans x
-              pure $ Force call cont
+sTrans :: ArityMap -> Var -> SExpr -> PartialBlock Var
+sTrans am x (Int n) = cont $ Constant n
+sTrans am x (POp n [a,b]) = cont $ IPrimOp n a b
+sTrans am x (CAp n args) = cont $ Store (CNode n args)
+sTrans am x (VAp n args) = cont $ uncurry Force (eTrans am $ VAp n args)
+sTrans am x (Proj n field e) = cont $ uncurry Force (eTrans am $ Proj n field e)
+sTrans am x (FAp f args)
+  | arity <= length args = cont $ uncurry Force (eTrans am $ FAp f args)
+  | otherwise            = cont $ Store (PartialF f (arity - length args) args)
+  where arity = getArity am f
+sTrans am _ x = cont $ uncurry Force (eTrans am x)
 
 -- Translate evaluation expressions
-eTrans :: SExpr -> State TransState (Call, Cont)
-eTrans (SVar x) = pure (Eval x, NOp)
-eTrans (Proj _ field x) = pure (Eval x, Select field)
-eTrans (CafAp n args)
-  | length args == 0 = pure (EvalCaf n, NOp)
-  | otherwise        = pure (EvalCaf n, Apply args)
-eTrans (FAp f args)
-  = do arity <- arityLookup f
-       case arity == length args of
-         True  -> pure (TLF f args, NOp)
-         False -> pure (TLF f (take arity args), Apply (drop arity args))
-eTrans (VAp n args) = pure (Eval n, Apply args)
+eTrans :: ArityMap -> SExpr -> (Call, Cont)
+eTrans am (SVar x) = (Eval x, NOp)
+eTrans am (Proj _ field x) = (Eval x, Select field)
+eTrans am (CafAp n args)
+  | length args == 0 = (EvalCaf n, NOp)
+  | otherwise        = (EvalCaf n, Apply args)
+eTrans am (FAp f args)
+  | getArity am f == length args = (TLF f args             , NOp)
+  | otherwise                    = (TLF f (take arity args), Apply (drop arity args))
+  where arity = getArity am f
+eTrans am (VAp n args) = (Eval n, Apply args)

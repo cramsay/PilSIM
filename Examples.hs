@@ -27,6 +27,19 @@ coreFoldl' = Fun "foldl'" ["f", "a", "xs"] $
                                                  (Simple $ FAp "foldl'" ["f", "b", "ys"])
                  ]
 
+coreSum2 = let plus = Fun "plus" ["x", "y"] $ -- Indirection to saturate prim op
+                        LetS (Binding "z" $ POp Plus ["x", "y"]) $ -- Indirection to force prim op to be strict
+                        Simple $ SVar "z"
+               sum2 = Fun "main" [] $
+                        LetS (Binding "c0" $ Int 0) $
+                        LetS (Binding "c1" $ Int 1) $
+                        LetS (Binding "c2" $ Int 2) $
+                        LetS (Binding "l0" $ CAp "Nil" []) $
+                        LetS (Binding "l1" $ CAp "Cons" ["c1", "l0"]) $
+                        LetS (Binding "l2" $ CAp "Cons" ["c2", "l1"]) $
+                        LetS (Binding "f"  $ FAp "plus" []) $
+                        Simple $ FAp "foldr" ["f", "c0", "l2"]
+           in [plus, coreFoldr, sum2]
 {-
 
 "foldr" is
