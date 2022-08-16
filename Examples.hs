@@ -2,6 +2,9 @@ module Examples where
 
 import SimpleCore
 import Translate
+import Pretty
+
+go = putStrLn . unlines . map pretty . translate
 
 coreFoldr = Fun "foldr" ["f", "a", "xs"] $
               Case (SVar "xs")

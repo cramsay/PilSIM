@@ -32,17 +32,17 @@ topTrans am (Caf g      body) = (g, ICaf      $ tTrans am body)
 
 tTrans :: ArityMap -> Expr -> Block
 tTrans am (Simple (CAp con args))
-  = Terminate $ Return (CNode con args)
+  = Terminate $ Return (Node (CTag con) args)
 tTrans am (Simple (FAp f args))
-  | length args < arity = Terminate $ Return (PartialF f (arity - length args) args)
+  | length args < arity = Terminate $ Return (Node (PTag f (arity - length args)) args)
   | otherwise                   = Terminate $ uncurry Jump $ eTrans am (FAp f args)
   where arity = getArity am f
 tTrans am (Simple s)
   = Terminate $ uncurry Jump $ eTrans am s
 tTrans am (Let  (Binding x s) e)
-  = vTrans am x s (\v -> tTrans am e)
+  = vTrans am s (subst x (tTrans am e))
 tTrans am (LetS (Binding x s) e)
-  = sTrans am x s (\v -> tTrans am e)
+  = sTrans am s (subst x (tTrans am e))
 tTrans am (Case s alts) -- TODO implement unambiguous scrutinee optimisation
   = Terminate $ uncurry ICase (eTrans am s) (map (altTrans am) alts)
 tTrans am (If cmp x y)
@@ -55,38 +55,38 @@ tTrans am (Throw x)
   = Terminate $ IThrow x
 
 altTrans :: ArityMap -> Alt -> IAlt
-altTrans am (Alt cn args e) = IAlt (CNode cn args) (tTrans am e)
+altTrans am (Alt cn args e) = IAlt (Node (CTag cn) args) (tTrans am e)
 
--- Translate a lazy subexpression -- TODO What do we do with the x?
-vTrans :: ArityMap -> Var -> SExpr -> PartialBlock Var
-vTrans am x (CafAp n args)
+-- Translate a lazy subexpression
+vTrans :: ArityMap -> SExpr -> PartialBlock Var
+vTrans am (CafAp n args)
   | length args == 0 = cont $ PushCaf n
   | otherwise        = PushCaf n `iseq` \h ->
-                       Store (FNode "ap" (h:args))
-vTrans am x (FAp n args)
-  | arity >  length args = cont $ Store (PartialF n (arity - length args) args)
-  | arity == length args = cont $ Store (FNode n args)
-  | otherwise            = Store (FNode n (take arity args)) `iseq` \h ->
-                           Store (FNode h (h : drop arity args))
+                       Store (Node (FTag "ap") (h:args))
+vTrans am (FAp n args)
+  | arity >  length args = cont $ Store (Node (PTag n (arity - length args)) args)
+  | arity == length args = cont $ Store (Node (FTag n) args)
+  | otherwise            = Store (Node (FTag n) (take arity args)) `iseq` \h ->
+                           Store (Node (FTag h) (h : drop arity args))
   where arity = getArity am n
-vTrans am x (VAp f args) = cont $ Store (FNode "ap" (f:args))
-vTrans am x (Proj n field var)  -- TODO How do we interpret the "FSel_n" notation? Is that the name of a predefined function?
-  = cont $ Store (FNode n' [var])
+vTrans am (VAp f args) = cont $ Store (Node (FTag "ap") (f:args))
+vTrans am (Proj n field var)  -- TODO How do we interpret the "FSel_n" notation? Is that the name of a predefined function?
+  = cont $ Store (Node (FTag n') [var])
   where n' = "sel_" ++ n
-vTrans am x e = undefined
+vTrans am e = undefined
 
 -- Translate a strict subexpression
-sTrans :: ArityMap -> Var -> SExpr -> PartialBlock Var
-sTrans am x (Int n) = cont $ Constant n
-sTrans am x (POp n [a,b]) = cont $ IPrimOp n a b
-sTrans am x (CAp n args) = cont $ Store (CNode n args)
-sTrans am x (VAp n args) = cont $ uncurry Force (eTrans am $ VAp n args)
-sTrans am x (Proj n field e) = cont $ uncurry Force (eTrans am $ Proj n field e)
-sTrans am x (FAp f args)
+sTrans :: ArityMap -> SExpr -> PartialBlock Var
+sTrans am (Int n) = cont $ Constant n
+sTrans am (POp n [a,b]) = cont $ IPrimOp n a b
+sTrans am (CAp n args) = cont $ Store (Node (CTag n) args)
+sTrans am (VAp n args) = cont $ uncurry Force (eTrans am $ VAp n args)
+sTrans am (Proj n field e) = cont $ uncurry Force (eTrans am $ Proj n field e)
+sTrans am (FAp f args)
   | arity <= length args = cont $ uncurry Force (eTrans am $ FAp f args)
-  | otherwise            = cont $ Store (PartialF f (arity - length args) args)
+  | otherwise            = cont $ Store (Node (PTag f (arity - length args)) args)
   where arity = getArity am f
-sTrans am _ x = cont $ uncurry Force (eTrans am x)
+sTrans am x = cont $ uncurry Force (eTrans am x)
 
 -- Translate evaluation expressions
 eTrans :: ArityMap -> SExpr -> (Call, Cont)
@@ -100,3 +100,59 @@ eTrans am (FAp f args)
   | otherwise                    = (TLF f (take arity args), Apply (drop arity args))
   where arity = getArity am f
 eTrans am (VAp n args) = (Eval n, Apply args)
+
+-- Subst a name in a block for a new name
+subst :: Var -> Block -> (Var -> Block)
+subst xold (Terminate t) xnew
+  = Terminate $ substTerm xold t xnew
+subst xold (i :> rest) xnew
+  = substInstr xold i xnew :> \h -> subst xold (rest h) xnew
+
+substTerm :: Var -> Terminator -> (Var -> Terminator)
+substTerm xold (Return n) xnew = Return $ substNode xold n xnew
+substTerm xold (Jump call cont) xnew = Jump (substCall xold call xnew)
+                                            (substCont xold cont xnew)
+substTerm xold (ICase call cont alts) xnew
+  = ICase (substCall xold call xnew) (substCont xold cont xnew)
+          (map (\a -> substAlt xnew a xold) alts)
+substTerm xold (IIf cmp x y) xnew = IIf cmp (subst xold x xnew)
+                                            (subst xold y xnew)
+substTerm xold (IThrow x) xnew
+  = IThrow (substVar xold x xnew)
+
+substInstr :: Var -> Instr a -> Var -> Instr a
+substInstr xold (Store n) xnew = Store $ substNode xold n xnew
+substInstr xold (PushCaf n) xnew = PushCaf n
+substInstr xold (IPrimOp op a b) xnew = IPrimOp op (substVar xold a xnew)
+                                                   (substVar xold b xnew)
+substInstr xold (Constant n) xnew = Constant n
+substInstr xold (ICall call cont) xnew = ICall (substCall xold call xnew)
+                                               (substCont xold cont xnew)
+substInstr xold (Force call cont) xnew = Force (substCall xold call xnew)
+                                               (substCont xold cont xnew)
+
+substNode :: Var -> Node -> Var -> Node
+substNode xold (Node tag args) xnew = Node tag (map (\v -> substVar xold v xnew) args)
+
+substAlt :: Var -> IAlt -> Var -> IAlt
+substAlt xold (IAlt (Node tag args) block) xnew
+  | xold `elem` args = IAlt (Node tag args) block -- Don't recurse if we'd be shadowing
+  | otherwise = IAlt (substNode xold (Node tag args) xnew)
+                     (subst xold block xnew)
+
+substCall :: Var -> Call -> Var -> Call
+substCall xold (Eval n) xnew = Eval (substVar xold n xnew)
+substCall xold (EvalCaf n) xnew = EvalCaf n
+substCall xold (TLF  n args) xnew = TLF n (map (\v -> substVar xold v xnew) args)
+substCall xold (IFix n args) xnew = IFix (substVar xold n xnew) (map (\v -> substVar xold v xnew) args)
+
+substCont :: Var -> Cont -> Var -> Cont
+substCont xold NOp xnew = NOp
+substCont xold (Apply args) xnew = Apply $ map (\v -> substVar xold v xnew) args
+substCont xold (Select n) xnew = Select n
+substCont xold (ICatch n) xnew = ICatch $ substVar xold n xnew
+
+substVar :: Var -> Var -> Var -> Var
+substVar old x new
+  | old == x = new
+  | otherwise = x

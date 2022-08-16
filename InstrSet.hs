@@ -1,15 +1,14 @@
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 
 module InstrSet where
 
 import SimpleCore
 
-data Node
-  = CNode    CName     [Var]
-  | FNode    FName     [Var]
-  | PartialF FName Int [Var]
+data Tag = CTag CName
+         | FTag FName
+         | PTag FName Int
+data Node = Node Tag [Var]
 
 data Cont
   = NOp
@@ -51,10 +50,6 @@ data Call
   | TLF     FName [Var]
   | IFix    FName [Var]
 
-deriving instance Show Node
-deriving instance Show Call
-deriving instance Show (Instr a)
-deriving instance Show Cont
 {-
 deriving instance Show Func
 deriving instance Show Terminator
