@@ -41,7 +41,10 @@ data PrimOp = Plus
             -- No exhaustive list given
   deriving Show
 
-data PrimCmp = CmpInt Expr Expr
+data PrimCmp = IntEQ Var Var
+             | IntLT Var Var
+             | IntGT Var Var
+             | IntLTE Var Var
   deriving Show
 
 data TExpr = Fun   FName [Var] Expr
