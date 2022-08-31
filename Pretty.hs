@@ -26,6 +26,11 @@ consperse sep [] = ""
 consperse sep [a]  = a
 consperse sep (a:as) = a ++ sep ++ consperse sep as
 
+padWith :: String -> Int -> String -> String
+padWith pad n acc
+  | n <= length acc = acc
+  | otherwise = padWith pad n (acc ++ pad)
+
 showTerminator :: Indent -> Terminator -> Printer String
 showTerminator indent (Return n) = pure $ indent ++ "Return " ++ show n
 showTerminator indent (Jump call cont) = pure $ indent ++ "Jump (" ++ show call ++ ") (" ++ show cont ++ ")"
@@ -35,7 +40,8 @@ showTerminator indent (ICase call cont alts)
 showTerminator indent (IIf cmp x y)
   = do x' <- showBlock (indent ++ "  ") x
        y' <- showBlock (indent ++ "  ") y
-       pure $ indent ++ "If " ++ show cmp ++ "\n" ++ x' ++ "\n" ++ y'
+       pure $ indent ++ "If " ++ show cmp ++ "\n" ++ indent ++ "Then\n" ++ x' ++
+                      "\n" ++ indent ++ "Else\n" ++ y'
 showTerminator indent (IThrow x) = pure $ indent ++ "throw " ++ x
 
 showFunc :: Func -> Printer String
@@ -56,6 +62,7 @@ evalInstr (Store node) = nextName "h"
 evalInstr (PushCaf g) = nextName "g"
 evalInstr (IPrimOp op x y) = nextName ("p" ++ show op)
 evalInstr (Constant n) = nextName "i"
+evalInstr (Force call cont) = nextName "h"
 evalInstr (ICall call cont)
   = do t <- nextName "tag"
        args <- mapM nextName (replicate 4 "arg")

@@ -3,8 +3,10 @@ module Translate where
 
 import InstrSet
 import SimpleCore
+import Pretty
 
 import Data.Maybe (catMaybes, fromMaybe)
+import Debug.Trace
 
 type PartialBlock a = (a -> Block) -> Block
 
@@ -114,9 +116,10 @@ substTerm xold (Jump call cont) xnew = Jump (substCall xold call xnew)
                                             (substCont xold cont xnew)
 substTerm xold (ICase call cont alts) xnew
   = ICase (substCall xold call xnew) (substCont xold cont xnew)
-          (map (\a -> substAlt xnew a xold) alts)
-substTerm xold (IIf cmp x y) xnew = IIf cmp (subst xold x xnew)
-                                            (subst xold y xnew)
+          (map (\a -> substAlt xold a xnew) alts)
+substTerm xold (IIf cmp x y) xnew = IIf (substCmp xold cmp xnew)
+                                      (subst xold x xnew)
+                                      (subst xold y xnew)
 substTerm xold (IThrow x) xnew
   = IThrow (substVar xold x xnew)
 
@@ -134,11 +137,22 @@ substInstr xold (Force call cont) xnew = Force (substCall xold call xnew)
 substNode :: Var -> Node -> Var -> Node
 substNode xold (Node tag args) xnew = Node tag (map (\v -> substVar xold v xnew) args)
 
+substCmp :: Var -> PrimCmp -> Var -> PrimCmp
+substCmp xold (IntEQ x y) xnew = IntEQ   (substVar xold x xnew)
+                                         (substVar xold y xnew)
+substCmp xold (IntLT x y) xnew = IntLT   (substVar xold x xnew)
+                                         (substVar xold y xnew)
+substCmp xold (IntGT x y) xnew = IntGT   (substVar xold x xnew)
+                                         (substVar xold y xnew)
+substCmp xold (IntLTE x y) xnew = IntLTE (substVar xold x xnew)
+                                         (substVar xold y xnew)
 substAlt :: Var -> IAlt -> Var -> IAlt
 substAlt xold (IAlt (Node tag args) block) xnew
-  | xold `elem` args = IAlt (Node tag args) block -- Don't recurse if we'd be shadowing
-  | otherwise = IAlt (substNode xold (Node tag args) xnew)
-                     (subst xold block xnew)
+ -- | xold `elem` args = IAlt (Node tag args) block -- Don't recurse if we'd be shadowing
+ -- | otherwise = IAlt (substNode xold (Node tag args) xnew)
+ --                    (subst xold block xnew)
+  = IAlt (substNode xold (Node tag args) xnew)
+         (subst xold block xnew)
 
 substCall :: Var -> Call -> Var -> Call
 substCall xold (Eval n) xnew = Eval (substVar xold n xnew)
