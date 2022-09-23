@@ -21,13 +21,15 @@ data SimState = SimState { heap :: Heap
                          , locals :: Locals
                          , env :: Env
                          , code :: Program
+                         , gcHeap :: Heap
                          , stats :: Stats }
 
 instance Show SimState where
-  show s = concat  [ "HEAP   ~> " ++ showLines (M.toList $ heap s)
+  show s = concat  [ "HEAP   ~> " ++ showLines (take 10 $ M.toList $ heap s)
                    , "Stack  ~> " ++ showLines (stack s)
                    , "Locals ~> " ++ showLines (locals s)
-                   , "Env    ~> " ++ showLines (env s)]
+                   -- , "Env    ~> " ++ showLines (take 10 $ env s)
+                   , "Stats  ~> " ++ show (stats s)]
     where indent =   "          "
           showLines :: Show a => [a] -> String
           showLines [] = unlines [""]
@@ -35,6 +37,7 @@ instance Show SimState where
 
 data NameType = Local
               | Arg Name Int -- Node name + index to arg
+              | Heap
   deriving (Eq, Show)
 
 type Sim = State SimState
@@ -53,10 +56,13 @@ data Atom = Ref Name
 data Node' = Node' Tag [Atom]
   deriving Show
 
-unconvNode :: Node' -> Node
-unconvNode (Node' tag args) = Node tag (map toName args)
-  where toName (Ref n) = n
-        toName (Pri i) = "p"++show i
+resolveNode :: Name -> Node' -> Sim Node
+resolveNode nname (Node' tag args) = do args' <- traverse toName (zip [0..] args)
+                                        pure $ Node tag args'
+  where toName (_,Ref n) = pure n
+        toName (i,Pri p) = do n <- newName "narg"
+                              envPush n (Arg nname i)
+                              pure n
 
 data Cont' = Apply' [Atom]
            | Select' Int
@@ -64,8 +70,8 @@ data Cont' = Apply' [Atom]
            | Update' Atom
   deriving Show
 
-data Return = RNTo (Node  -> Block)
-            | RRTo (Name  -> Block)
+data Return = RNTo (Node -> Block)
+            | RRTo (Name -> Block)
             | RCase [IAlt]
             | RNext
             | RMain
@@ -82,6 +88,7 @@ data Stats = Stats { scCount :: Int
                    , primCount :: Int
                    , heapAllocs :: Int
                    , heapReads :: Int
+                   , heapMax :: Int
                    , maxStkDepth :: Int
                    , cycles :: Int
                    , nameI :: Int}
@@ -116,6 +123,7 @@ envRead n =
      case nt of
        Local -> qRead n
        (Arg node field) -> sReadA node field
+       Heap -> pure $ Ref n -- Don't actually fetch from heap... just resolve the name to a reference
 
 hInitial :: Heap
 hInitial = M.empty
@@ -162,8 +170,8 @@ sCompress :: Node' -> Sim ()
 sCompress n
   = do s <- get
        let ((_,topConts,topRets) : rest) = stack s
-       put $ s { stack = ([("ret", n)],topConts,topRets) : rest }
-       -- ^ Should  be OK to make up the "ret" name here since caller will grab it implicitly from the top of the stack (?)
+       nname <- newName "ret"
+       put $ s { stack = ([(nname, n)],topConts,topRets) : rest }
 
 sPush :: StackFrame -> Sim ()
 sPush frame
@@ -177,12 +185,24 @@ sPop
        put $ s { stack = rest }
        return top
 
-stepAccounting :: Sim ()
-stepAccounting
+stepAccounting :: EvalMode -> Sim ()
+stepAccounting m
   = do -- Update cycle count
        s <- get
+       if M.size (heap s) > (4000-200)
+         then do garbageCollect m
+                 s <- get
+                 let sts = stats s
+                     sts' = sts { heapMax = length (heap s) }
+                 put s {stats = sts'}
+         else pure ()
+       s <- get
+       if M.size (heap s) > (4000-200)
+         then error "Heap exhausted even after GC!"
+         else pure ()
+       s <- get
        let sts = stats s
-           sts' = sts {cycles = 1 + cycles sts}
+           sts'  = sts {cycles = 1 + cycles sts}
        put $ s {stats = sts'}
        -- Prune env entries that reference the stack
        let stkNames = concat $ map (\(ns,_,_)->map fst ns) (stack s)
@@ -203,10 +223,10 @@ sReadA node field
          Nothing             -> error $ "Couldn't find node in top stack frame: " ++ show node
 
 statInitial :: Stats
-statInitial = Stats 0 0 0 0 0 (-1) 0
+statInitial = Stats 0 0 0 0 0 0 (-1) 0
 
 simInitial :: Program -> SimState
-simInitial prog = SimState hInitial [frame] [] [] prog statInitial  -- TODO Add CAF nodes to heap
+simInitial prog = SimState hInitial [frame] [] [] prog M.empty statInitial  -- TODO Add CAF nodes to heap
   where frame = ([("main", Node' (FTag "main") [])]
                 ,[]
                 ,RMain)
@@ -218,12 +238,13 @@ modeInitial prog = let Just (IFun _ code) = lookup "main" prog
 traceState :: String -> Sim () -> Sim ()
 traceState header m
   = do s <- get
-       trace (header ++ show s) m
+       --trace (header ++ show s) m
+       m
 
-sim prog = evalState (step $ modeInitial prog) (simInitial prog)
+sim prog = execState (step $ modeInitial prog) (simInitial prog)
 
 step :: EvalMode -> Sim ()
-step m = do stepAccounting
+step m = do stepAccounting m
             c <- statsGetCycles
             dispatch c m
   where
@@ -334,7 +355,8 @@ cSim (Eval x) e r
        case x' of
          (Pri n) -> error $ "Tried to Eval a primitive: Eval " ++ show x
          (Ref p) -> do n  <- hLookup p
-                       sPush ( [("eval", n)]
+                       nname <- newName "eval"
+                       sPush ( [(nname, n)]
                              , e'
                              , r )
                        qEmpty
@@ -344,7 +366,8 @@ cSim (Eval x) e r
 cSim (EvalCaf g) e r
   = do e' <- constructCont e
        n  <- hLookup g
-       sPush ( [("evalcaf", n)]
+       nname <- newName "evalcaf"
+       sPush ( [(nname, n)]
              , e'
              , r )
        qEmpty
@@ -415,42 +438,50 @@ eSim = do s <- get
            sPush ( [ (name, n) ]
                  , c
                  , r )
-           step EvalE
+           thenRet
 
     go h ( [(name, n)] , ICatch' _ : c, r ) []
       = do _ <- sPop
            sPush ( [ (name, n) ]
                  , c
                  , r )
-           step EvalE
+           thenRet
 
     go h ( [(_, Node' (CTag cn) vals)] , Select' i : c, r ) []
       = do let (Ref xi) = vals !! i
            n <- hLookup xi
            _ <- sPop
-           sPush ( [ ("?", n) ]
+           nname <- newName "select"
+           sPush ( [ (nname, n) ]
                  , c
                  , r )
+           thenRet
 
     go h ( [(sn, Node' (PTag fn m) vals)] , Apply' as : c, r ) []
       | m >  length as = do _ <- sPop
                             sPush ( [(sn, Node' (PTag fn (m-length as)) (vals ++ as))]
                                   , c
                                   , r )
-                            step EvalE
+                            thenRet
       | m == length as = do _ <- sPop
                             sPush ( [(sn, Node' (FTag fn) (vals ++ as))]
                                   , c
                                   , r )
-                            step EvalE
+                            thenRet
       | otherwise      = do let rem = length as - m
                             _ <- sPop
                             sPush ( [(sn, Node' (FTag fn) (vals ++ take rem as))]
                                   , Apply' (drop rem as) : c
                                   , r )
-                            step EvalE
+                            thenRet
 
-    go h ( [n] , [] , RNext ) []
+    go h frame locs = thenRet
+
+    thenRet
+      = do s <- get
+           goRet (head $ stack s)
+
+    goRet ( [n] , [] , RNext )
       = do _ <- sPop
            (nodes, conts, ret) <- sPop
            sPush ( [n]
@@ -458,21 +489,23 @@ eSim = do s <- get
                  , ret )
            step EvalE
 
-    go h ( [(name,n)], [] , RNTo retCode ) []
+    goRet ( [(name,n)], [] , RNTo retCode )
       = do _ <- sPop
            (nodes, conts, ret) <- sPop
            sPush ( (name, n) : nodes
                  , conts
                  , ret )
-           step $ EvalI $ (retCode $ unconvNode n)
+           n' <- resolveNode name n
+           step $ EvalI $ (retCode n')
 
-    go h ( [(name,n)], [] , RRTo retCode ) []
+    goRet ( [(name,n)], [] , RRTo retCode )
       = do _ <- sPop
            y <- hAlloc "h" n
-           qPush (Ref y)
+           y' <- qPush (Ref y)
+           envPush y Heap
            step $ EvalI $ (retCode y)
 
-    go h ( [(n, Node' (CTag cn) vals)] , [] , RCase alts ) []
+    goRet ( [(n, Node' (CTag cn) vals)] , [] , RCase alts )
       = do _ <- sPop
            (nodes, conts, ret) <- sPop
            nodeName <- newName "scr"
@@ -487,21 +520,16 @@ eSim = do s <- get
                | otherwise = selectAlt nodeName cn rest
     -- ^ TODO do I have to resolve project field names? These are like ARGs
 
-    go h ( [(name, n)] , [] , RMain ) []
+    goRet ( [(name, n)] , [] , RMain )
       = pure () -- End of program!
-
-    go h frame locs = error $ unlines
-                        ["Non-exhaustive patterns in go for frame:"
-                        , show frame
-                        , "And locs"
-                        , show locs]
 
 wSim :: Atom -> Sim ()
 wSim x = do (nodes, conts, ret) <- sPop
             go nodes conts ret
   where go nodes (ICatch' (Ref h) : conts) ret
           = do n <- hLookup h
-               sPush ( [("_",n)]
+               nname <- newName "catch"
+               sPush ( [(nname,n)]
                      , Apply' [x] : conts
                      , ret )
                qPush (Ref h)
@@ -514,16 +542,61 @@ wSim x = do (nodes, conts, ret) <- sPop
         go nodes [] ret
           =  step $ EvalW x
 
-{-
+garbageCollect :: EvalMode -> Sim ()
+garbageCollect m
+  = do s <- get
+       -- Collect from stack
+       _ <- traverse gcCopyFrame (stack s)
+       -- Collect from queue
+       _ <- traverse gcCopyAtom (map snd $ locals s)
+       -- Collect from rest of function instructions
+       -- gcCopyEvalMode m
+       -- Update heap
+       s <- get
+       put $ s { heap = gcHeap s, gcHeap = M.empty }
+       -- TODO clean env
 
-I'm not sure if node stack entries should even have a name?
+gcCopyNode :: Node' -> Sim ()
+gcCopyNode (Node' _ args)
+  = do _ <- traverse gcCopyAtom args
+       pure ()
 
-Need to work out if we should look for locals in queue or as atoms from node
-Maybe annotate names in InstrSet?
+isCollected :: Name -> Sim Bool
+isCollected n
+  = do gcheap <- gcHeap <$> get
+       pure $ isJust $ n `M.lookup` gcheap
 
-26/08/22
+gcCopyAtom :: Atom -> Sim ()
+gcCopyAtom (Pri _) = pure ()
+gcCopyAtom (Ref n)
+  = do s <- get
+       case lookup n (env s) of
+         Just Heap -> copyHeapNode n
+         Nothing   -> copyHeapNode n
+         _         -> pure ()
 
-I reread the semantics! the eSim mode is actually two sets of rules which should
-be _composed_. We shouldn't take separate cycles to perform the continuation
-_and_ return.
--}
+  where copyHeapNode n
+          = do done <- isCollected n
+               s <- get
+               if done
+                 then pure ()
+                 else case n `M.lookup` (heap s) of
+                        Nothing -> pure ()
+                        Just node ->
+                          do s <- get
+                             let s' = s { gcHeap = M.insert n node (gcHeap s) }
+                             put s'
+                             gcCopyNode node
+
+gcCopyCont :: Cont' -> Sim ()
+gcCopyCont (Apply' args) = do _ <- traverse gcCopyAtom args
+                              pure ()
+gcCopyCont (Select' _  ) = pure ()
+gcCopyCont (ICatch' a  ) = gcCopyAtom a
+gcCopyCont (Update' a  ) = gcCopyAtom a
+
+gcCopyFrame :: StackFrame -> Sim ()
+gcCopyFrame (ns, conts, rets)
+  =  do _ <- traverse gcCopyNode (map snd ns)
+        _ <- traverse gcCopyCont conts
+        pure ()

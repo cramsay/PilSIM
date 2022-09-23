@@ -45,6 +45,8 @@ tTrans am (Let  (Binding x s) e)
   = vTrans am s (subst x (tTrans am e))
 tTrans am (LetS (Binding x s) e)
   = sTrans am s (subst x (tTrans am e))
+tTrans am (Case s [Alt cn args e])
+  = (uncurry ICall (eTrans am s)) :> (substs args (tTrans am e))
 tTrans am (Case s alts) -- TODO implement unambiguous scrutinee optimisation
   = Terminate $ uncurry ICase (eTrans am s) (map (altTrans am) alts)
 tTrans am (If cmp x y)
@@ -64,17 +66,17 @@ vTrans :: ArityMap -> SExpr -> PartialBlock Var
 vTrans am (CafAp n args)
   | length args == 0 = cont $ PushCaf n
   | otherwise        = PushCaf n `iseq` \h ->
-                       Store (Node (FTag "ap") (h:args))
+                       Store (Node (FTag $ "ap_" ++ show (length (h:args))) (h:args))
 vTrans am (FAp n args)
   | arity >  length args = cont $ Store (Node (PTag n (arity - length args)) args)
   | arity == length args = cont $ Store (Node (FTag n) args)
   | otherwise            = Store (Node (FTag n) (take arity args)) `iseq` \h ->
                            Store (Node (FTag h) (h : drop arity args))
   where arity = getArity am n
-vTrans am (VAp f args) = cont $ Store (Node (FTag "ap") (f:args))
+vTrans am (VAp f args) = cont $ Store (Node (FTag $ "ap_" ++ show (length (f:args))) (f:args))
 vTrans am (Proj n field var)  -- TODO How do we interpret the "FSel_n" notation? Is that the name of a predefined function?
   = cont $ Store (Node (FTag n') [var])
-  where n' = "sel_" ++ n
+  where n' = "sel_" ++ show field
 vTrans am e = undefined
 
 -- Translate a strict subexpression
@@ -170,3 +172,9 @@ substVar :: Var -> Var -> Var -> Var
 substVar old x new
   | old == x = new
   | otherwise = x
+
+substs :: [Var] -> Block -> (Node -> Block)
+substs olds x (Node _ news) = substs' olds x news
+
+substs' :: [Var] -> Block -> ([Var] -> Block)
+substs' olds x news = foldr (\(old,new) b -> subst old b new) x (zip olds news)
