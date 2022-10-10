@@ -315,7 +315,5 @@ coreOrdList depth
 
     ]
 
-main = print $ run (coreOrdList 4)
-
 -- TODO What about the fixpoint operator?
 -- TODO Add CAF support
