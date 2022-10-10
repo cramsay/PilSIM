@@ -6,8 +6,9 @@ import Pretty
 import Simulate
 
 run = statsNormaliseCycleTypes . sim . translate . (prelude ++)
-
 trans = putStrLn . unlines . map pretty . translate
+
+reportPipelining = statsCollectCycleTypes . run
 
 -- Prelude functions for lazy evaluation.
 -- Could generate more variations of these with TH.

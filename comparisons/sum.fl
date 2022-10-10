@@ -1,0 +1,4 @@
+{
+foldrSum a ds = case ds of { Nil -> a; Cons x xs -> x + (foldrSum a xs) };
+main  = foldrSum 0 (Cons 1 (Cons 2 (Cons 3 Nil)));
+}

@@ -18,26 +18,25 @@ data EvalMode = EvalI Block
               | EvalE
               | EvalW Atom
 
--- H = Hazard Only
--- B = Pipeline Bubble
+data CycleDep
+  = CDNothing
+  | CDBranch
+  | CDHazard Int -- There's a data dependency hazard with n cycles between
+                 -- allocation (now) and first use point
+  deriving (Show, Ord, Eq)
+
 data CycleType
   = CTStore
   | CTPushCaf
   | CTPrimOp
   | CTConstant
-  | CTCallH
-  | CTCallB
-  | CTForceH
-  | CTForceB
-  | CTReturnH
-  | CTReturnB
-  | CTJumpH
-  | CTJumpB
-  | CTCaseH
-  | CTCaseB
+  | CTCall
+  | CTForce
+  | CTReturn
+  | CTJump
+  | CTCase
   | CTIf
-  | CTThrowH
-  | CTThrowB
+  | CTThrow
   | CTStkEval
   | CTStkException
   deriving (Show, Ord, Eq)
@@ -118,7 +117,7 @@ data Stats = Stats { scCount :: Int
                    , heapMax :: Int
                    , maxStkDepth :: Int
                    , cycles :: Int
-                   , cycleTypes :: M.Map CycleType Int
+                   , cycleTypes :: M.Map CycleType (M.Map CycleDep Float)
                    , nameI :: Int}
   deriving Show
 
@@ -245,36 +244,107 @@ stepAccounting m
            sts'  = sts {cycles = 1 + cycles sts}
        put $ s {stats = sts'}
 
-statsIncCycleType :: CycleType -> Sim ()
-statsIncCycleType ct
+statsIncCycleType :: CycleType -> CycleDep -> Sim ()
+statsIncCycleType ct cd
   = do s <- get
        let sts = stats s
-           sts' = sts {cycleTypes = M.insertWith (+) ct 1 (cycleTypes sts)}
+           sts' = sts {cycleTypes = M.insertWith (\k a -> M.insertWith (+) cd 1 a) ct (M.singleton cd 1) (cycleTypes sts)}
        put $ s {stats = sts'}
 
-statsIncCycleType' :: Call -> CycleType -> CycleType -> Sim ()
-statsIncCycleType' (Eval    x) h b = statsIncCycleType b
-statsIncCycleType' (EvalCaf g) h b = statsIncCycleType h
-statsIncCycleType' (TLF  f as) h b = statsIncCycleType h
-statsIncCycleType' (IFix f as) h b = statsIncCycleType h
+statsIncCycleType' :: Call -> CycleType -> Sim ()
+statsIncCycleType' (Eval    x) t = statsIncCycleType t CDBranch
+statsIncCycleType' (EvalCaf g) t = statsIncCycleType t CDNothing
+statsIncCycleType' (TLF  f as) t = statsIncCycleType t CDNothing
+statsIncCycleType' (IFix f as) t = statsIncCycleType t CDNothing
+
+-- Count instrs before next use
+findUse :: Block -> CycleDep
+findUse b = fromMaybe CDNothing $ fmap CDHazard (go $ markLHS b)
+  where
+  go b@(Store    n :> _)
+    | inNode n = Just 1
+    | otherwise = findNext b
+  go b@(PushCaf  n :> _)
+    = findNext b
+  go b@(IPrimOp  o x y :> _)
+    | markName == x = Just 1
+    | markName == y = Just 1
+    | otherwise = findNext b
+  go b@(Constant i :> _)
+    = findNext b
+  go b@(ICall    ca co :> _) -- For all continuations, we _might_ see hazards, but
+                           -- we would need to inspect what is called first...
+                           -- I'm going to ignore those and assume the call
+                           -- introduces sufficient latency to avoid the hazard.
+    | inCall ca = Just 1
+    | otherwise = Nothing  -- Again, being kind here. We don't know how long the call will be.
+  go b@(Force    ca co :> _)
+    | inCall ca = Just 1
+    | otherwise = Nothing
+  go (Terminate (Return n))
+    | inNode n  = Just 1
+    | otherwise = Nothing
+  go (Terminate (Jump ca co))
+    | inCall ca = Just 1
+    | otherwise = Nothing
+  go (Terminate (ICase ca co alts))
+    | inCall ca = Just 1
+    | otherwise = Nothing
+  go (Terminate (IIf o x y))
+    | inCmp o = Just 1
+    | otherwise = Nothing
+  go (Terminate (IThrow x))
+    | markName == x = Just 1
+    | otherwise = Nothing
+
+  findNext rest = fmap (+1) (go (feedBlock rest))
+
+  markName = "__HAZARD_DETECT__"
+
+  markLHS :: Block -> Block
+  markLHS (Store    n     :> b) = b markName
+  markLHS (PushCaf  n     :> b) = b markName
+  markLHS (IPrimOp  o x y :> b) = b markName
+  markLHS (Constant i     :> b) = b markName
+  markLHS (ICall    ca co :> b) = b (Node (CTag "") $ replicate 4 markName)
+  markLHS (Force    ca co :> b) = b markName
+
+  feedBlock :: Block -> Block
+  feedBlock (Store    n     :> b) = b ""
+  feedBlock (PushCaf  n     :> b) = b ""
+  feedBlock (IPrimOp  o x y :> b) = b ""
+  feedBlock (Constant i     :> b) = b ""
+  feedBlock (ICall    ca co :> b) = b (Node (CTag "") $ replicate 4 "")
+
+  inNode (Node _ args) = markName `elem` args
+
+  inCmp (IntEQ x y) = x == markName || y == markName
+  inCmp (IntLT x y) = x == markName || y == markName
+  inCmp (IntGT x y) = x == markName || y == markName
+  inCmp (IntLTE x y) = x == markName || y == markName
+
+  inCall (Eval x) = False -- Ignore since this will count as a control flow operation
+  inCall (EvalCaf g) = g==markName
+  inCall (TLF _ as) = markName `elem` as
+  inCall (IFix _ as) = markName `elem` as
 
 logCycleTypeB :: Block -> Sim ()
-logCycleTypeB (Store    n :> _) = statsIncCycleType CTStore
-logCycleTypeB (PushCaf  n :> _) = statsIncCycleType CTPushCaf
-logCycleTypeB (IPrimOp  o x y :> _) = statsIncCycleType CTPrimOp
-logCycleTypeB (Constant i :> _) = statsIncCycleType CTConstant
-logCycleTypeB (ICall    ca co :> _) = statsIncCycleType' ca CTCallH CTCallB
-logCycleTypeB (Force    ca co :> _) = statsIncCycleType' ca CTForceH CTCallB
-logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturnH
-logCycleTypeB (Terminate (Jump ca co)) = statsIncCycleType' ca CTJumpH CTJumpB
-logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType' ca CTCaseH CTCaseB
-logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf
-logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrowH
+logCycleTypeB b@(Store    n     :> _) = statsIncCycleType CTStore (findUse b)
+logCycleTypeB b@(PushCaf  n     :> _) = statsIncCycleType CTPushCaf (findUse b)
+logCycleTypeB b@(IPrimOp  o x y :> _) = statsIncCycleType CTPrimOp (findUse b)
+logCycleTypeB b@(Constant i     :> _) = statsIncCycleType CTConstant (findUse b)
+logCycleTypeB b@(ICall    ca co :> _) = statsIncCycleType' ca CTCall
+logCycleTypeB b@(Force    ca co :> _) = statsIncCycleType' ca CTForce
+logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturn CDNothing
+logCycleTypeB (Terminate (Jump ca co)) = statsIncCycleType' ca CTJump
+logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType' ca CTCase
+logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf CDNothing
+logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrow CDNothing
 
 logCycleType :: EvalMode -> Sim ()
 logCycleType (EvalI b) = logCycleTypeB b
-logCycleType EvalE = statsIncCycleType CTStkEval
-logCycleType (EvalW x) = statsIncCycleType CTStkException
+logCycleType EvalE = statsIncCycleType CTStkEval CDNothing
+logCycleType (EvalW x) = statsIncCycleType CTStkException CDNothing
 
 
 statsNormaliseCycleTypes :: SimState -> SimState
@@ -283,8 +353,13 @@ statsNormaliseCycleTypes s
         sts' = sts {cycleTypes = norm (cycleTypes sts)}
     in s {stats = sts'}
   where
-    totalCs cts = sum . map snd $ M.toList cts
-    norm cts = M.map (\v -> 100*v `div` totalCs cts) cts
+    totalCs cts = sum . concat . map (map snd . M.toList . snd) $ M.toList cts
+    norm cts = M.map (M.map (\v -> 100*v / totalCs cts)) cts
+
+statsCollectCycleTypes :: SimState -> M.Map CycleDep Float
+statsCollectCycleTypes s
+  = let cts = (cycleTypes . stats) s
+    in M.fromListWith (+) . concat . map (M.toList . snd) $ M.toList cts
 
 statsGetCycles :: Sim Int
 statsGetCycles
