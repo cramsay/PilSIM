@@ -11,9 +11,36 @@ import Data.Maybe
 import Data.List
 import Debug.Trace
 
+
+maxHeapSize = 2^14
+
 data EvalMode = EvalI Block
               | EvalE
               | EvalW Atom
+
+-- H = Hazard Only
+-- B = Pipeline Bubble
+data CycleType
+  = CTStore
+  | CTPushCaf
+  | CTPrimOp
+  | CTConstant
+  | CTCallH
+  | CTCallB
+  | CTForceH
+  | CTForceB
+  | CTReturnH
+  | CTReturnB
+  | CTJumpH
+  | CTJumpB
+  | CTCaseH
+  | CTCaseB
+  | CTIf
+  | CTThrowH
+  | CTThrowB
+  | CTStkEval
+  | CTStkException
+  deriving (Show, Ord, Eq)
 
 type Program = [(Name, Func)]
 data SimState = SimState { heap :: Heap
@@ -28,7 +55,7 @@ instance Show SimState where
   show s = concat  [ "HEAP   ~> " ++ showLines (take 10 $ M.toList $ heap s)
                    , "Stack  ~> " ++ showLines (stack s)
                    , "Locals ~> " ++ showLines (locals s)
-                   -- , "Env    ~> " ++ showLines (take 10 $ env s)
+                   , "Env    ~> " ++ showLines (take 10 $ env s)
                    , "Stats  ~> " ++ show (stats s)]
     where indent =   "          "
           showLines :: Show a => [a] -> String
@@ -36,7 +63,7 @@ instance Show SimState where
           showLines (a:as) = unlines $ show a : map (\a -> indent ++ show a) as
 
 data NameType = Local
-              | Arg Name Int -- Node name + index to arg
+              | Arg Int
               | Heap
   deriving (Eq, Show)
 
@@ -45,7 +72,7 @@ type Sim = State SimState
 type StackFrame = ([(Name,Node')], [Cont'], Return)
 type Stack      = [StackFrame]
 type Locals     = [(Name,Atom)]
-type Env        = [(Name, NameType)]
+type Env        = [(Name, Name, NameType)] -- Reference name, Stack node name, reference type
 
 type Arity = Int
 
@@ -61,7 +88,7 @@ resolveNode nname (Node' tag args) = do args' <- traverse toName (zip [0..] args
                                         pure $ Node tag args'
   where toName (_,Ref n) = pure n
         toName (i,Pri p) = do n <- newName "narg"
-                              envPush n (Arg nname i)
+                              envPush n nname (Arg i)
                               pure n
 
 data Cont' = Apply' [Atom]
@@ -91,6 +118,7 @@ data Stats = Stats { scCount :: Int
                    , heapMax :: Int
                    , maxStkDepth :: Int
                    , cycles :: Int
+                   , cycleTypes :: M.Map CycleType Int
                    , nameI :: Int}
   deriving Show
 
@@ -102,28 +130,42 @@ newName base
        put $ s { stats = st {nameI = 1 + nameI st} }
        pure n
 
-envPush :: Name -> NameType -> Sim ()
-envPush n nt = do s <- get
-                  put $ s { env = (n, nt) : env s }
+envPush :: Name -> Name -> NameType -> Sim ()
+envPush n sname nt = do s <- get
+                        put $ s { env = (n, sname, nt) : env s }
 
-envEmpty :: (NameType -> Bool) -> Sim ()
-envEmpty f = do s <- get
-                put $ s { env = filter (not . f . snd) (env s) }
+envPush' :: Name -> NameType -> Sim ()
+envPush' n nt = do sname <- curSName
+                   envPush n sname nt
 
-envTranslate :: Name -> Sim NameType
+-- Empty env entries of items referencing given stack nodes
+-- Cleans local queue too.
+envEmpty :: [Name] -> Sim ()
+envEmpty snames
+  = do s <- get
+       let s' = s {locals = filter (\(n,_) -> not $ n `elem` oldLocals s) (locals s)}
+       put $ s' { env = filter (\(_,sname,_) -> not $ sname `elem` snames) (env s') }
+  where oldLocals s = map (\(n,_,_)->n) $ filter (\(n,sname,nt) -> nt==Local && (sname `elem` snames)) (env s)
+
+envTranslate :: Name -> Sim (Name, NameType)
 envTranslate n =
   do s <- get
-     case lookup n (env s) of
-       Just a -> pure a
-       Nothing -> error $ "Name not found in env: " ++ show n
+     case lookup n (map (\(x,sname,r) -> (x,(sname,r))) $ env s) of
+       Just (sname, a) -> pure (sname, a)
+       Nothing         -> error $ "Name not found in env: " ++ show n
 
 envRead :: Name -> Sim Atom
 envRead n =
-  do nt <- envTranslate n
+  do (sname, nt) <- envTranslate n
      case nt of
        Local -> qRead n
-       (Arg node field) -> sReadA node field
+       (Arg field) -> sReadA sname field
        Heap -> pure $ Ref n -- Don't actually fetch from heap... just resolve the name to a reference
+
+curSName :: Sim Name
+curSName = do s <- stack <$> get
+              let (nodes, _, _) = s!!0
+              pure $ fst (nodes!!0)
 
 hInitial :: Heap
 hInitial = M.empty
@@ -151,7 +193,7 @@ qPush a =
   do n <- newName "q"
      s <- get
      put $ s { locals = (n,a) : locals s }
-     envPush n Local
+     envPush' n Local
      return n
 
 qRead :: Name -> Sim Atom
@@ -161,16 +203,13 @@ qRead n =
        Just a  -> pure a
        Nothing -> error $ "Local variable not found in queue: " ++ show n
 
-qEmpty :: Sim ()
-qEmpty = do s <- get
-            put $ s { locals = [] }
-            envEmpty (==Local)
-
 sCompress :: Node' -> Sim ()
 sCompress n
   = do s <- get
-       let ((_,topConts,topRets) : rest) = stack s
+       let ((topNodes,topConts,topRets) : rest) = stack s
+       envEmpty (map fst topNodes)
        nname <- newName "ret"
+       s <- get
        put $ s { stack = ([(nname, n)],topConts,topRets) : rest }
 
 sPush :: StackFrame -> Sim ()
@@ -189,7 +228,7 @@ stepAccounting :: EvalMode -> Sim ()
 stepAccounting m
   = do -- Update cycle count
        s <- get
-       if M.size (heap s) > (4000-200)
+       if M.size (heap s) > maxHeapSize-200
          then do garbageCollect m
                  s <- get
                  let sts = stats s
@@ -197,18 +236,55 @@ stepAccounting m
                  put s {stats = sts'}
          else pure ()
        s <- get
-       if M.size (heap s) > (4000-200)
+       if M.size (heap s) > (maxHeapSize-200)
          then error "Heap exhausted even after GC!"
          else pure ()
+       logCycleType m
        s <- get
        let sts = stats s
            sts'  = sts {cycles = 1 + cycles sts}
        put $ s {stats = sts'}
-       -- Prune env entries that reference the stack
-       let stkNames = concat $ map (\(ns,_,_)->map fst ns) (stack s)
-       envEmpty (argNotIn stkNames)
-  where argNotIn ns (Arg n _) = not $ n `elem` ns
-        argNotIn ns _         = False
+
+statsIncCycleType :: CycleType -> Sim ()
+statsIncCycleType ct
+  = do s <- get
+       let sts = stats s
+           sts' = sts {cycleTypes = M.insertWith (+) ct 1 (cycleTypes sts)}
+       put $ s {stats = sts'}
+
+statsIncCycleType' :: Call -> CycleType -> CycleType -> Sim ()
+statsIncCycleType' (Eval    x) h b = statsIncCycleType b
+statsIncCycleType' (EvalCaf g) h b = statsIncCycleType h
+statsIncCycleType' (TLF  f as) h b = statsIncCycleType h
+statsIncCycleType' (IFix f as) h b = statsIncCycleType h
+
+logCycleTypeB :: Block -> Sim ()
+logCycleTypeB (Store    n :> _) = statsIncCycleType CTStore
+logCycleTypeB (PushCaf  n :> _) = statsIncCycleType CTPushCaf
+logCycleTypeB (IPrimOp  o x y :> _) = statsIncCycleType CTPrimOp
+logCycleTypeB (Constant i :> _) = statsIncCycleType CTConstant
+logCycleTypeB (ICall    ca co :> _) = statsIncCycleType' ca CTCallH CTCallB
+logCycleTypeB (Force    ca co :> _) = statsIncCycleType' ca CTForceH CTCallB
+logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturnH
+logCycleTypeB (Terminate (Jump ca co)) = statsIncCycleType' ca CTJumpH CTJumpB
+logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType' ca CTCaseH CTCaseB
+logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf
+logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrowH
+
+logCycleType :: EvalMode -> Sim ()
+logCycleType (EvalI b) = logCycleTypeB b
+logCycleType EvalE = statsIncCycleType CTStkEval
+logCycleType (EvalW x) = statsIncCycleType CTStkException
+
+
+statsNormaliseCycleTypes :: SimState -> SimState
+statsNormaliseCycleTypes s
+  = let sts = stats s
+        sts' = sts {cycleTypes = norm (cycleTypes sts)}
+    in s {stats = sts'}
+  where
+    totalCs cts = sum . map snd $ M.toList cts
+    norm cts = M.map (\v -> 100*v `div` totalCs cts) cts
 
 statsGetCycles :: Sim Int
 statsGetCycles
@@ -223,7 +299,7 @@ sReadA node field
          Nothing             -> error $ "Couldn't find node in top stack frame: " ++ show node
 
 statInitial :: Stats
-statInitial = Stats 0 0 0 0 0 0 (-1) 0
+statInitial = Stats 0 0 0 0 0 0 (-1) M.empty 0
 
 simInitial :: Program -> SimState
 simInitial prog = SimState hInitial [frame] [] [] prog M.empty statInitial  -- TODO Add CAF nodes to heap
@@ -323,7 +399,6 @@ iSim (Terminate (IIf cmp xblock yblock))
 
 iSim (Terminate (IThrow x))
   = do val <- envRead x
-       qEmpty
        step $ EvalW val
 
 cLookup :: Name -> Sim Block
@@ -359,7 +434,6 @@ cSim (Eval x) e r
                        sPush ( [(nname, n)]
                              , e'
                              , r )
-                       qEmpty
                        --qPush (Ref p) --FIXME we need this to still be called, x, right?
                        step EvalE
 
@@ -370,7 +444,6 @@ cSim (EvalCaf g) e r
        sPush ( [(nname, n)]
              , e'
              , r )
-       qEmpty
        qPush (Ref g)
        step EvalE
 
@@ -382,7 +455,7 @@ cSim (TLF f args) e r
              , e'
              , r )
        argNames <- cLookupArgs f
-       _ <- traverse (\(n,i) -> envPush n (Arg nodeName i)) (zip argNames [0..])
+       _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
        is <- cLookup f
        step $ EvalI is
 
@@ -395,44 +468,44 @@ cSim (IFix f args) e r
              , Update' (Ref y) : e'
              , r )
        argNames <- cLookupArgs f
-       _ <- traverse (\(n,i) -> envPush n (Arg nodeName i)) (zip argNames [0..])
+       _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
        is <- cLookup f
        qPush (Ref y)
        step $ EvalI is
 
 rSim :: Node' -> Sim ()
 rSim n = do sCompress n
-            qEmpty
             step EvalE
 
 eSim :: Sim ()
 eSim = do s <- get
           go (heap s) (head $ stack s) (locals s)
   where
-    go h ( [(_, Node' (FTag f) vals)] , c, r ) [(_,u)]
+    go h ( [(sname, Node' (FTag f) vals)] , c, r ) ((_,u):qs)
       = do _ <- sPop
            nodeName <- newName "fn"
            argNames <- cLookupArgs f
-           _ <- traverse (\(n,i) -> envPush n (Arg nodeName i)) (zip argNames [0..])
+           _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
            sPush ( [(nodeName, Node' (FTag f) vals)]
-                 , Update' u : c
+                 , c --Update' u : c
                  , r )
-           qEmpty
+           envEmpty [sname]
            is <- cLookup f
            step $ EvalI is
 
-    go h ( [(_, Node' (FTag f) vals)] , c, r ) []
+    go h ( [(sname, Node' (FTag f) vals)] , c, r ) _
       = do _ <- sPop
            nodeName <- newName "fn"
            argNames <- cLookupArgs f
-           _ <- traverse (\(n,i) -> envPush n (Arg nodeName i)) (zip argNames [0..])
+           _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
            sPush ( [(nodeName, Node' (FTag f) vals)]
                  , c
                  , r )
+           envEmpty [sname]
            is <- cLookup f
            step $ EvalI is
 
-    go h ( [(name, n)] , Update' (Ref u) : c, r ) []
+    go h ( [(name, n)] , Update' (Ref u) : c, r ) _
       = do hUpdate u n
            _ <- sPop
            sPush ( [ (name, n) ]
@@ -440,14 +513,14 @@ eSim = do s <- get
                  , r )
            thenRet
 
-    go h ( [(name, n)] , ICatch' _ : c, r ) []
+    go h ( [(name, n)] , ICatch' _ : c, r ) _
       = do _ <- sPop
            sPush ( [ (name, n) ]
                  , c
                  , r )
            thenRet
 
-    go h ( [(_, Node' (CTag cn) vals)] , Select' i : c, r ) []
+    go h ( [(sname, Node' (CTag cn) vals)] , Select' i : c, r ) _
       = do let (Ref xi) = vals !! i
            n <- hLookup xi
            _ <- sPop
@@ -455,9 +528,10 @@ eSim = do s <- get
            sPush ( [ (nname, n) ]
                  , c
                  , r )
+           envEmpty [sname]
            thenRet
 
-    go h ( [(sn, Node' (PTag fn m) vals)] , Apply' as : c, r ) []
+    go h ( [(sn, Node' (PTag fn m) vals)] , Apply' as : c, r ) _
       | m >  length as = do _ <- sPop
                             sPush ( [(sn, Node' (PTag fn (m-length as)) (vals ++ as))]
                                   , c
@@ -487,6 +561,7 @@ eSim = do s <- get
            sPush ( [n]
                  , conts
                  , ret )
+           envEmpty (map fst nodes)
            step EvalE
 
     goRet ( [(name,n)], [] , RNTo retCode )
@@ -502,8 +577,11 @@ eSim = do s <- get
       = do _ <- sPop
            y <- hAlloc "h" n
            y' <- qPush (Ref y)
-           envPush y Heap
-           step $ EvalI $ (retCode y)
+           sname <- curSName
+           envPush y sname Heap
+           envPush y' sname Local
+           envEmpty [name]
+           step $ EvalI $ (retCode y')
 
     goRet ( [(n, Node' (CTag cn) vals)] , [] , RCase alts )
       = do _ <- sPop
@@ -515,7 +593,7 @@ eSim = do s <- get
            is <- selectAlt nodeName cn alts
            step $ EvalI is
        where selectAlt nodeName cn ( IAlt (Node (CTag cn') args) code : rest )
-               | cn == cn' = do _ <- traverse (\(arg,i) -> envPush arg (Arg nodeName i)) (zip args [0..])
+               | cn == cn' = do _ <- traverse (\(arg,i) -> envPush arg nodeName (Arg i)) (zip args [0..])
                                 pure code
                | otherwise = selectAlt nodeName cn rest
     -- ^ TODO do I have to resolve project field names? These are like ARGs
@@ -549,12 +627,9 @@ garbageCollect m
        _ <- traverse gcCopyFrame (stack s)
        -- Collect from queue
        _ <- traverse gcCopyAtom (map snd $ locals s)
-       -- Collect from rest of function instructions
-       -- gcCopyEvalMode m
        -- Update heap
        s <- get
        put $ s { heap = gcHeap s, gcHeap = M.empty }
-       -- TODO clean env
 
 gcCopyNode :: Node' -> Sim ()
 gcCopyNode (Node' _ args)
@@ -570,8 +645,8 @@ gcCopyAtom :: Atom -> Sim ()
 gcCopyAtom (Pri _) = pure ()
 gcCopyAtom (Ref n)
   = do s <- get
-       case lookup n (env s) of
-         Just Heap -> copyHeapNode n
+       case lookup n (map (\(n,sn,nt)->(n,(sn,nt))) $ env s) of
+         Just (_, Heap) -> copyHeapNode n
          Nothing   -> copyHeapNode n
          _         -> pure ()
 

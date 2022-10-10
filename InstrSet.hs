@@ -28,12 +28,12 @@ data Block where
 infixr 6 :>
 
 data Instr ret where
-  Store    :: Node                 -> Instr Var -- Var
-  PushCaf  :: CafName              -> Instr Var -- Var
-  IPrimOp  :: PrimOp -> Var -> Var -> Instr Var -- Prim
-  Constant :: Int                  -> Instr Var -- Var
+  Store    :: Node                 -> Instr Var
+  PushCaf  :: CafName              -> Instr Var
+  IPrimOp  :: PrimOp -> Var -> Var -> Instr Var
+  Constant :: Int                  -> Instr Var
   ICall    :: Call -> Cont         -> Instr Node
-  Force    :: Call -> Cont         -> Instr Var -- Var
+  Force    :: Call -> Cont         -> Instr Var
 
 data Terminator
   = Return Node
@@ -49,15 +49,3 @@ data Call
   | EvalCaf CafName
   | TLF     FName [Var]
   | IFix    FName [Var]
-
-{-
-deriving instance Show Func
-deriving instance Show Terminator
-deriving instance Show IAlt
-
-instance Show Block where
-  show = unlines . go
-    where go (Terminate t) = [show t]
-          go ((lhs,rhs) :> rest) = (show lhs ++ " <- " ++ show rhs) : go rest
-
--}

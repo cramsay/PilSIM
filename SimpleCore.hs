@@ -2,7 +2,7 @@ module SimpleCore where
 
 type Name = String
 
--- Type synonyms for different names
+-- Type synonyms for different kinds of name
 type Var = Name
 type FName = Name
 type CName = Name
@@ -38,7 +38,7 @@ data Alt = Alt CName [Var] Expr
 data PrimOp = Plus
             | Sub
             | LEq
-            -- No exhaustive list given
+            -- TODO No exhaustive list given in paper...
   deriving Show
 
 data PrimCmp = IntEQ Var Var
@@ -47,7 +47,7 @@ data PrimCmp = IntEQ Var Var
              | IntLTE Var Var
   deriving Show
 
-data TExpr = Fun   FName [Var] Expr
+data TExpr = Fun FName   [Var] Expr
            | Caf CafName       Expr
   deriving Show
 

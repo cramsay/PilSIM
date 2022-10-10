@@ -47,7 +47,7 @@ tTrans am (LetS (Binding x s) e)
   = sTrans am s (subst x (tTrans am e))
 tTrans am (Case s [Alt cn args e])
   = (uncurry ICall (eTrans am s)) :> (substs args (tTrans am e))
-tTrans am (Case s alts) -- TODO implement unambiguous scrutinee optimisation
+tTrans am (Case s alts)
   = Terminate $ uncurry ICase (eTrans am s) (map (altTrans am) alts)
 tTrans am (If cmp x y)
   = Terminate $ IIf cmp (tTrans am x) (tTrans am y)
