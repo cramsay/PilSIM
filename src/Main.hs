@@ -14,11 +14,11 @@ guess3Stage prog
   = guessPerf prog 3  350e6 (M.fromList [(CDBranch,1.5),(CDHazard 1,0.7*1)])
 
 main = do putStrLn $ "Running sumO2 [0,1,2,3]..."
-          guess3Stage (coreSumO2)
+          reportPipelining (coreSumO2)
           putStrLn $ "Running fibO2 20..."
-          guess3Stage (coreFibO2 20)
+          reportPipelining (coreFibO2 20)
           putStrLn $ "Running OrdList 4..."
-          guess3Stage (coreOrdList 4)
+          reportPipelining (coreOrdList 4)
           putStrLn $ "Running MSS -12 to 12..."
-          guess3Stage (coreMSS 12)
+          reportPipelining (coreMSS 12)
 

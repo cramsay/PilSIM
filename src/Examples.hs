@@ -95,9 +95,9 @@ coreAnds = let and = Fun "and" ["x", "y"] $
                         LetS (Binding "l0" $ CAp "Nil" []) $
                         LetS (Binding "l1" $ CAp "Cons" ["cTrue", "l0"]) $
                         LetS (Binding "l2" $ CAp "Cons" ["cTrue", "l1"]) $
-                        LetS (Binding "f"  $ FAp "and" []) $
-                        Simple $ FAp "foldr" ["f", "cTrue", "l2"]
-           in [and, coreFoldr, sum2]
+                        Let  (Binding "f"  $ FAp "and" []) $
+                        Simple $ FAp "foldl" ["f", "cTrue", "l2"]
+           in [and, coreFoldl, sum2]
 
 -- A naive example of folding primitive addition over a list. Introduces
 -- primitives and their operations.
@@ -161,10 +161,10 @@ coreFib n
                           (Simple $ CAp "Int#" ["i1"])
                           (LetS (Binding "a" $ POp Sub ["xi", "i1"]) $
                            LetS (Binding "ac" $ CAp "Int#" ["a"]) $
-                           LetS (Binding "fiba" $ FAp "fib" ["ac"]) $
+                           Let  (Binding "fiba" $ FAp "fib" ["ac"]) $
                            LetS (Binding "b" $ POp Sub ["xi", "i2"]) $
                            LetS (Binding "bc" $ CAp "Int#" ["b"]) $
-                           LetS (Binding "fibb" $ FAp "fib" ["bc"]) $
+                           Let  (Binding "fibb" $ FAp "fib" ["bc"]) $
                            Case (SVar "fiba")
                              [ Alt "Int#" ["ai"] $
                                  Case (SVar "fibb") $
@@ -224,29 +224,31 @@ coreOrdList depth
 
     ,Fun "implies" ["x", "y"] $
        Case (SVar "x")
-         [ Alt "False"  [] $ Simple (CAp "True" [])
-         , Alt "True" [] $ Simple (SVar "y")
+         [ Alt "False" [] $ Simple (CAp "True" [])
+         , Alt "True"  [] $ Simple (SVar "y")
          ]
 
     ,Fun "and" ["x", "y"] $
        Case (SVar "x")
-         [ Alt "False"  [] $ Simple (CAp "False" [])
-         , Alt "True" [] $ Simple (SVar "y")
+         [ Alt "False" [] $ Simple (CAp "False" [])
+         , Alt "True"  [] $ Simple (SVar "y")
          ]
 
     ,Fun "andList" ["xs"] $
        Case (SVar "xs")
          [ Alt "Nil"  [] $ Simple (CAp "True" [])
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "rest" $ FAp "andList" ["ys"]) $
-             Simple $ FAp "and" ["y", "rest"]
+             Case (SVar "y")
+               [ Alt "False" [] $ Simple $ CAp "False" []
+               , Alt "True"  [] $ Simple $ FAp "andList" ["ys"]
+               ]
          ]
 
     ,Fun "append" ["xs", "ys"] $
        Case (SVar "xs")
          [ Alt "Nil"  [] $ Simple (SVar "ys")
          , Alt "Cons" ["z", "zs"] $
-             LetS (Binding "rest" $ FAp "append" ["zs", "ys"]) $
+             Let (Binding "rest" $ FAp "append" ["zs", "ys"]) $
              Simple $ CAp "Cons" ["z", "rest"]
          ]
 
@@ -254,8 +256,8 @@ coreOrdList depth
        Case (SVar "xs")
          [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "head" $ VAp "f" ["y"]) $
-             LetS (Binding "rest" $ FAp "map" ["f", "ys"]) $
+             Let (Binding "head" $ VAp "f" ["y"]) $
+             Let (Binding "rest" $ FAp "map" ["f", "ys"]) $
              Simple $ CAp "Cons" ["head", "rest"]
          ]
 
@@ -267,7 +269,7 @@ coreOrdList depth
                [ Alt "Nil"  [] $ Simple (CAp "True" [])
                , Alt "Cons" ["z", "zs"] $
                    LetS (Binding "a" $ FAp "implies" ["y","z"]) $
-                   Let  (Binding "b" $ FAp "ord" ["ys"]) $
+                   Let  (Binding "b" $ FAp "ord" ["ys"]) $ -- Appeal to `and` short-circuiting
                    Simple $ FAp "and" ["a", "b"]
                ]
          ]
@@ -275,14 +277,14 @@ coreOrdList depth
     ,Fun "insert" ["x", "ys"] $
        Case (SVar "ys")
          [ Alt "Nil"  [] $
-             LetS (Binding "nil" $ FAp "nil" []) $ -- CAF
+             LetS (Binding "nil" $ CafAp "cafNil" []) $
              Simple (CAp "Cons" ["x", "nil"])
          , Alt "Cons" ["z", "zs"] $
              Case (FAp "implies" ["x", "z"])
                [ Alt "True"  [] $
                    Simple (CAp "Cons" ["x", "ys"])
                , Alt "False" [] $
-                   LetS (Binding "rest" $ FAp "insert" ["x","zs"]) $
+                   Let (Binding "rest" $ FAp "insert" ["x","zs"]) $
                    Simple $ CAp "Cons" ["z", "rest"]
                ]
          ]
@@ -290,7 +292,7 @@ coreOrdList depth
     ,Fun "prop" ["x", "xs"] $
        LetS (Binding "inserted" $ FAp "insert" ["x", "xs"]) $
        LetS (Binding "origOrd"  $ FAp "ord" ["xs"]) $
-       LetS (Binding "newOrd"   $ FAp "ord" ["inserted"]) $
+       Let  (Binding "newOrd"   $ FAp "ord" ["inserted"]) $
        Simple $ FAp "implies" ["origOrd", "newOrd"]
 
     ,Fun "cons" ["x", "xs"] $
@@ -299,27 +301,27 @@ coreOrdList depth
     ,Fun "boolList" ["n"] $
        LetS (Binding "i1" $ Int 1) $
        If (IntLT "n" "i1")
-         ( Let (Binding "nil" $ FAp "nil" []) $ -- CAF
+         ( LetS (Binding "nil" $ CafAp "cafNil" []) $
            Simple $ CAp "Cons" ["nil", "nil"]
          )
          ( LetS (Binding "m"  $ POp Sub ["n", "i1"]) $
-           LetS  (Binding "rec" $ FAp "boolList" ["m"]) $
-           LetS  (Binding "f" $ FAp "false" []) $ -- CAF
-           LetS  (Binding "consF" $ FAp "cons" ["f"]) $
-           LetS  (Binding "withF" $ FAp "map" ["consF", "rec"]) $
-           LetS  (Binding "t" $ FAp "true" []) $ -- CAF
-           LetS  (Binding "consT" $ FAp "cons" ["t"]) $
-           LetS  (Binding "withT" $ FAp "map" ["consT", "rec"]) $
+           LetS (Binding "rec" $ FAp "boolList" ["m"]) $
+           LetS (Binding "f" $ CafAp "cafFalse" []) $
+           LetS (Binding "consF" $ FAp "cons" ["f"]) $
+           LetS (Binding "withF" $ FAp "map" ["consF", "rec"]) $
+           LetS (Binding "t" $ CafAp "cafTrue" []) $
+           LetS (Binding "consT" $ FAp "cons" ["t"]) $
+           LetS (Binding "withT" $ FAp "map" ["consT", "rec"]) $
            LetS (Binding "news"  $ FAp "append" ["withF", "withT"]) $
            Simple $ FAp "append" ["rec", "news"]
          )
 
     ,Fun "top" ["n"] $
        LetS  (Binding "lists" $ FAp "boolList" ["n"]) $
-       LetS  (Binding "f" $ FAp "false" []) $ -- CAF
+       LetS  (Binding "f" $ CafAp "cafFalse" []) $
        LetS  (Binding "propWithF" $ FAp "prop" ["f"]) $
        LetS  (Binding "resF" $ FAp "map" ["propWithF", "lists"]) $
-       LetS  (Binding "t" $ FAp "true" []) $ -- CAF
+       LetS  (Binding "t" $ CafAp "cafTrue" []) $
        LetS  (Binding "propWithT" $ FAp "prop" ["t"]) $
        LetS  (Binding "resT" $ FAp "map" ["propWithT", "lists"]) $
        LetS  (Binding "res"  $ FAp "append" ["resF", "resT"]) $
@@ -336,13 +338,14 @@ coreMSS n
   = [Fun "init" ["xs"] $
        Case (SVar "xs")
          [ Alt "Nil" [] $
-             Simple $ CAp "Nil" []
+             Simple $ CafAp "cafNil" []
          , Alt "Cons" ["y", "ys"] $
              Case (SVar "ys")
                [ Alt "Nil" [] $
-                   Simple $ CAp "Nil" []
+                   Simple $ CafAp "cafNil" []
                , Alt "Cons" ["z", "zs"] $
-                   LetS (Binding "initRest" $ FAp "init" ["ys"]) $
+                   LetS (Binding "evaldYs" $ CAp "Cons" ["z", "zs"]) $
+                   LetS (Binding "initRest" $ FAp "init" ["evaldYs"]) $
                    Simple $ CAp "Cons" ["y", "initRest"]
                ]
          ]
@@ -350,29 +353,31 @@ coreMSS n
     ,Fun "inits" ["xs"] $
        Case (SVar "xs")
          [ Alt "Nil" [] $
-             LetS (Binding "nil" $ CAp "Nil" []) $
-             Simple $ CAp "Cons" ["nil", "nil"]
+             LetS (Binding "nil" $ CafAp "cafNil" []) $
+             Simple $ CAp "Cons" ["nil", "nil"] -- Should be a CAF but no full support yet.
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "initXs" $ FAp "init"  ["xs"]) $
-             LetS (Binding "rest"   $ FAp "inits" ["initXs"]) $
-             Simple $ CAp "Cons" ["xs", "rest"]
+             LetS (Binding "evaldXs" $ CAp "Cons" ["y", "ys"]) $
+             Let (Binding "initXs" $ FAp "init"  ["evaldXs"]) $
+             Let (Binding "rest"   $ FAp "inits" ["initXs"]) $
+             Simple $ CAp "Cons" ["evaldXs", "rest"]
          ]
 
     ,Fun "tails" ["xs"] $
        Case (SVar "xs")
          [ Alt "Nil" [] $
-             Simple $ CAp "Nil" []
+             Simple $ CafAp "cafNil" []
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "rest"   $ FAp "tails" ["ys"]) $
-             Simple $ CAp "Cons" ["xs", "rest"]
+             LetS (Binding "evaldXs" $ CAp "Cons" ["y", "ys"]) $
+             Let (Binding "rest"   $ FAp "tails" ["ys"]) $
+             Simple $ CAp "Cons" ["evaldXs", "rest"]
          ]
 
     ,Fun "map" ["f", "xs"] $
        Case (SVar "xs")
-         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         [ Alt "Nil"  [] $ Simple (CafAp "Nil" [])
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "head" $ VAp "f" ["y"]) $
-             LetS (Binding "rest" $ FAp "map" ["f", "ys"]) $
+             Let (Binding "head" $ VAp "f" ["y"]) $
+             Let (Binding "rest" $ FAp "map" ["f", "ys"]) $
              Simple $ CAp "Cons" ["head", "rest"]
          ]
 
@@ -380,22 +385,22 @@ coreMSS n
        Case (SVar "xs")
          [ Alt "Nil"  [] $ Simple (SVar "ys")
          , Alt "Cons" ["z", "zs"] $
-             LetS (Binding "rest" $ FAp "append" ["zs", "ys"]) $
+             Let (Binding "rest" $ FAp "append" ["zs", "ys"]) $
              Simple $ CAp "Cons" ["z", "rest"]
          ]
 
     ,Fun "concatMap" ["f", "xs"] $
        Case (SVar "xs")
-         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         [ Alt "Nil"  [] $ Simple (CafAp "cafNil" [])
          , Alt "Cons" ["y", "ys"] $
              LetS (Binding "fy"   $ VAp "f" ["y"]) $
-             LetS (Binding "rest" $ FAp "concatMap" ["f", "ys"]) $
+             Let  (Binding "rest" $ FAp "concatMap" ["f", "ys"]) $
              Simple $ FAp "append" ["fy", "rest"]
          ]
 
     ,Fun "segments" ["xs"] $
        LetS (Binding "initsXs" $ FAp "inits" ["xs"]) $
-       LetS (Binding "f"       $ FAp "tails" []) $
+       Let  (Binding "f"       $ FAp "tails" []) $
        Simple $ FAp "concatMap" ["f", "initsXs"]
 
     ,Fun "max" ["m", "xs"] $
@@ -431,18 +436,18 @@ coreMSS n
 
     ,Fun "mapSum" ["xs"] $
        Case (SVar "xs")
-         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         [ Alt "Nil"  [] $ Simple (CafAp "cafNil" [])
          , Alt "Cons" ["y", "ys"] $
              Case (FAp "sum" ["y"])
                [ Alt "Int#" ["head"] $
-                   LetS (Binding "rest" $ FAp "mapSum" ["ys"]) $
+                   Let (Binding "rest" $ FAp "mapSum" ["ys"]) $
                    Simple $ CAp "Cons" ["head", "rest"]
                ]
          ]
 
     ,Fun "mss" ["xs"] $
-       LetS (Binding "segs"  $ FAp "segments" ["xs"]) $
-       LetS (Binding "segss" $ FAp "mapSum" ["segs"]) $
+       Let (Binding "segs"  $ FAp "segments" ["xs"]) $
+       Let (Binding "segss" $ FAp "mapSum" ["segs"]) $
        --Simple $ SVar "segss"
        Simple $ FAp "maximum" ["segss"]
 
@@ -450,14 +455,14 @@ coreMSS n
        If (IntLTE "n" "m")
          (LetS (Binding "one" $ Int 1) $
           LetS (Binding "next" $ POp Plus ["one", "n"]) $
-          LetS (Binding "rest" $ FAp "fromTo" ["next", "m"]) $
+          Let  (Binding "rest" $ FAp "fromTo" ["next", "m"]) $
           Simple $ CAp "Cons" ["n", "rest"])
          (Simple $ CAp "Nil" [])
 
     ,Fun "main" [] $
        LetS (Binding "iLim"  $ Int   n ) $
        LetS (Binding "inLim" $ Int (-n)) $
-       LetS (Binding "range" $ FAp "fromTo" ["inLim", "iLim"]) $
+       Let (Binding "range" $ FAp "fromTo" ["inLim", "iLim"]) $
        Simple $ FAp "mss" ["range"]
     ]
 

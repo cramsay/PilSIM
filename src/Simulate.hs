@@ -51,7 +51,7 @@ data SimState = SimState { heap :: Heap
                          , stats :: Stats }
 
 instance Show SimState where
-  show s = concat  [ "HEAP   ~> " ++ showLines ( M.toList $ heap s)
+  show s = concat  [ "HEAP   ~> " ++ showLines (take 10 $ M.toList $ heap s)
                    , "Stack  ~> " ++ showLines (stack s)
                    , "Locals ~> " ++ showLines (locals s)
                    , "Env    ~> " ++ showLines (take 10 $ env s)
@@ -116,6 +116,8 @@ data Stats = Stats { scCount :: Int
                    , heapReads :: Int
                    , heapMax :: Int
                    , maxStkDepth :: Int
+                   , maxQueueDepth :: Int
+                   , gcEvents :: Int
                    , cycles :: Int
                    , cycleTypes :: M.Map CycleType (M.Map CycleDep Float)
                    , nameI :: Int}
@@ -167,7 +169,15 @@ curSName = do s <- stack <$> get
               pure $ fst (nodes!!0)
 
 hInitial :: Heap
-hInitial = M.empty
+hInitial = M.fromList [("cafNil",   Node' (CTag "Nil")   [])
+                      ,("cafFalse", Node' (CTag "False") [])
+                      ,("cafTrue",  Node' (CTag "True" ) [])] -- An initial set of CAFs
+
+envInitial :: Env
+envInitial = [("cafNil",   "main", Heap)
+             ,("cafFalse", "main", Heap)
+             ,("cafTrue",  "main", Heap)
+             ]
 
 hAlloc :: Name -> Node' -> Sim Name
 hAlloc n node
@@ -231,17 +241,28 @@ stepAccounting m
          then do garbageCollect m
                  s <- get
                  let sts = stats s
-                     sts' = sts { heapMax = length (heap s) }
+                     sts' = sts { heapMax = max (length (heap s)) (heapMax sts)
+                                , gcEvents = 1 + gcEvents sts
+                                }
                  put s {stats = sts'}
          else pure ()
        s <- get
        if M.size (heap s) > (maxHeapSize-200)
          then error "Heap exhausted even after GC!"
          else pure ()
+
+       -- Track cycle types
        logCycleType m
+
+       -- Update cycles, max queue, and stack sizes
        s <- get
        let sts = stats s
-           sts'  = sts {cycles = 1 + cycles sts}
+           curStkDepth = sum $ map (\(ns,_,_) -> length ns) (stack s)
+           curQueueDepth = length $ locals s
+           sts' = sts { cycles = 1 + cycles sts
+                      , maxStkDepth   = max curStkDepth   (maxStkDepth   sts)
+                      , maxQueueDepth = max curQueueDepth (maxQueueDepth sts)
+                      }
        put $ s {stats = sts'}
 
 statsIncCycleType :: CycleType -> CycleDep -> Sim ()
@@ -379,10 +400,10 @@ sReadA node field
          Nothing             -> error $ "Couldn't find node in top stack frame: " ++ show node
 
 statInitial :: Stats
-statInitial = Stats 0 0 0 0 0 0 (-1) M.empty 0
+statInitial = Stats 0 0 0 0 0 0 0 0 (-1) M.empty 0
 
 simInitial :: Program -> SimState
-simInitial prog = SimState hInitial [frame] [] [] prog M.empty statInitial  -- TODO Add CAF nodes to heap
+simInitial prog = SimState hInitial [frame] [] envInitial prog M.empty statInitial  -- TODO Add CAF nodes to heap
   where frame = ([("main", Node' (FTag "main") [])]
                 ,[]
                 ,RMain)
@@ -524,7 +545,8 @@ cSim (EvalCaf g) e r
        sPush ( [(nname, n)]
              , e'
              , r )
-       qPush (Ref g)
+       --g' <- qPush (Ref g)
+       --envPush g' nname Local
        step EvalE
 
 cSim (TLF f args) e r
@@ -541,7 +563,7 @@ cSim (TLF f args) e r
 
 cSim (IFix f args) e r
   = do e' <- constructCont e
-       y <- hAlloc "tmp" (Node' (CTag "tmp") [])
+       y <- hAlloc "fix" (Node' (CTag "_fix") [])
        vals <- mapM envRead args
        nodeName <- newName "fn"
        sPush ( [(nodeName, Node' (FTag f) vals)]
@@ -550,7 +572,8 @@ cSim (IFix f args) e r
        argNames <- cLookupArgs f
        _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
        is <- cLookup f
-       qPush (Ref y)
+       y' <- qPush (Ref y)
+       envPush y' nodeName Local
        step $ EvalI is
 
 rSim :: Node' -> Sim ()
@@ -658,7 +681,7 @@ eSim = do s <- get
            y <- hAlloc "h" n
            y' <- qPush (Ref y)
            sname <- curSName
-           envPush y sname Heap
+           --envPush y sname Heap
            envPush y' sname Local
            envEmpty [name]
            step $ EvalI $ (retCode y')
@@ -707,6 +730,8 @@ garbageCollect m
        _ <- traverse gcCopyFrame (stack s)
        -- Collect from queue
        _ <- traverse gcCopyAtom (map snd $ locals s)
+       -- Collect CAFs from env
+       _ <- traverse gcCopyAtom (map (\(n,_,_)-> Ref n) . filter (\(_,_,nt)->nt==Heap) $ env s)
        -- Update heap
        s <- get
        put $ s { heap = gcHeap s, gcHeap = M.empty }
