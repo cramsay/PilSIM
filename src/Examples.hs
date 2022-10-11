@@ -5,6 +5,8 @@ import Translate
 import Pretty
 import Simulate
 
+import qualified Data.Map.Lazy as M
+
 run = statsNormaliseCycleTypes . sim . translate . (prelude ++)
 trans = putStrLn . unlines . map pretty . translate
 
@@ -14,6 +16,14 @@ reportPipelining prog
        putStrLn $ "Dependencies = " ++ show (statsCollectCycleDeps  state)
        putStrLn $ "Cycle types  = " ++ show (statsCollectCycleTypes state)
        putStrLn "----------------------"
+
+guessPerf prog stages clk bubbleMap
+  = do let state = run prog
+       let cycleCount = fromIntegral . cycles . stats $ state
+       let cycleDeps = statsCollectCycleDeps state
+       let withBubs = M.mapWithKey (\k x -> x * (1+(M.findWithDefault 0 k bubbleMap))) cycleDeps
+       let pipelinedCycles = stages + (sum $ M.elems withBubs)/100.0*cycleCount
+       putStrLn $ "Time = " ++ show (pipelinedCycles / clk)
 
 -- Prelude functions for lazy evaluation.
 -- Could generate more variations of these with TH.
