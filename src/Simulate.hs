@@ -51,7 +51,7 @@ data SimState = SimState { heap :: Heap
                          , stats :: Stats }
 
 instance Show SimState where
-  show s = concat  [ "HEAP   ~> " ++ showLines (take 10 $ M.toList $ heap s)
+  show s = concat  [ "HEAP   ~> " ++ showLines ( M.toList $ heap s)
                    , "Stack  ~> " ++ showLines (stack s)
                    , "Locals ~> " ++ showLines (locals s)
                    , "Env    ~> " ++ showLines (take 10 $ env s)
@@ -273,9 +273,9 @@ findUse b = fromMaybe CDNothing $ fmap CDHazard (go $ markLHS b)
   go b@(Constant i :> _)
     = findNext b
   go b@(ICall    ca co :> _) -- For all continuations, we _might_ see hazards, but
-                           -- we would need to inspect what is called first...
-                           -- I'm going to ignore those and assume the call
-                           -- introduces sufficient latency to avoid the hazard.
+                             -- we would need to inspect what is called first...
+                             -- I'm going to ignore those and assume the call
+                             -- introduces sufficient latency to avoid the hazard.
     | inCall ca = Just 1
     | otherwise = Nothing  -- Again, being kind here. We don't know how long the call will be.
   go b@(Force    ca co :> _)
@@ -318,14 +318,14 @@ findUse b = fromMaybe CDNothing $ fmap CDHazard (go $ markLHS b)
 
   inNode (Node _ args) = markName `elem` args
 
-  inCmp (IntEQ x y) = x == markName || y == markName
-  inCmp (IntLT x y) = x == markName || y == markName
-  inCmp (IntGT x y) = x == markName || y == markName
+  inCmp (IntEQ x y)  = x == markName || y == markName
+  inCmp (IntLT x y)  = x == markName || y == markName
+  inCmp (IntGT x y)  = x == markName || y == markName
   inCmp (IntLTE x y) = x == markName || y == markName
 
-  inCall (Eval x) = False -- Ignore since this will count as a control flow operation
+  inCall (Eval x)    = x==markName
   inCall (EvalCaf g) = g==markName
-  inCall (TLF _ as) = markName `elem` as
+  inCall (TLF _ as)  = markName `elem` as
   inCall (IFix _ as) = markName `elem` as
 
 logCycleTypeB :: Block -> Sim ()
@@ -335,11 +335,11 @@ logCycleTypeB b@(IPrimOp  o x y :> _) = statsIncCycleType CTPrimOp (findUse b)
 logCycleTypeB b@(Constant i     :> _) = statsIncCycleType CTConstant (findUse b)
 logCycleTypeB b@(ICall    ca co :> _) = statsIncCycleType' ca CTCall
 logCycleTypeB b@(Force    ca co :> _) = statsIncCycleType' ca CTForce
-logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturn CDNothing
+logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturn CDBranch
 logCycleTypeB (Terminate (Jump ca co)) = statsIncCycleType' ca CTJump
 logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType' ca CTCase
-logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf CDNothing
-logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrow CDNothing
+logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf CDBranch
+logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrow CDBranch
 
 logCycleType :: EvalMode -> Sim ()
 logCycleType (EvalI b) = logCycleTypeB b
@@ -356,10 +356,15 @@ statsNormaliseCycleTypes s
     totalCs cts = sum . concat . map (map snd . M.toList . snd) $ M.toList cts
     norm cts = M.map (M.map (\v -> 100*v / totalCs cts)) cts
 
-statsCollectCycleTypes :: SimState -> M.Map CycleDep Float
-statsCollectCycleTypes s
+statsCollectCycleDeps :: SimState -> M.Map CycleDep Float
+statsCollectCycleDeps s
   = let cts = (cycleTypes . stats) s
     in M.fromListWith (+) . concat . map (M.toList . snd) $ M.toList cts
+
+statsCollectCycleTypes :: SimState -> M.Map CycleType Float
+statsCollectCycleTypes s
+  = let cts = (cycleTypes . stats) s
+    in M.map (sum . map snd . M.toList) cts
 
 statsGetCycles :: Sim Int
 statsGetCycles

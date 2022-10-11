@@ -39,9 +39,6 @@ fromTo n m = case (<=) n m of {
                False -> Nil;
              };
 
-main = (+) ((-) (mss (fromTo ((-) 0 160) 160))
-                (mss (fromTo ((-) 0 150) 150)))
-           ((-) (mss (fromTo ((-) 0 161) 161))
-                (mss (fromTo ((-) 0 151) 151)));
+main = mss (fromTo ((-) 0 12) 12);
 
 }

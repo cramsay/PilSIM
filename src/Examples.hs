@@ -8,7 +8,12 @@ import Simulate
 run = statsNormaliseCycleTypes . sim . translate . (prelude ++)
 trans = putStrLn . unlines . map pretty . translate
 
-reportPipelining = statsCollectCycleTypes . run
+reportPipelining prog
+  = do let state = run prog
+       putStrLn $ "Cycles = " ++ show (cycles . stats $ state)
+       putStrLn $ "Dependencies = " ++ show (statsCollectCycleDeps  state)
+       putStrLn $ "Cycle types  = " ++ show (statsCollectCycleTypes state)
+       putStrLn "----------------------"
 
 -- Prelude functions for lazy evaluation.
 -- Could generate more variations of these with TH.
@@ -314,6 +319,136 @@ coreOrdList depth
         LetS (Binding "n"  $ Int depth) $
         Simple $ FAp "top" ["n"]
 
+    ]
+
+-- MSS benchmark from Introducing the PilGRIM/Reduceron papers.
+coreMSS n
+  = [Fun "init" ["xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             Simple $ CAp "Nil" []
+         , Alt "Cons" ["y", "ys"] $
+             Case (SVar "ys")
+               [ Alt "Nil" [] $
+                   Simple $ CAp "Nil" []
+               , Alt "Cons" ["z", "zs"] $
+                   LetS (Binding "initRest" $ FAp "init" ["ys"]) $
+                   Simple $ CAp "Cons" ["y", "initRest"]
+               ]
+         ]
+
+    ,Fun "inits" ["xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             LetS (Binding "nil" $ CAp "Nil" []) $
+             Simple $ CAp "Cons" ["nil", "nil"]
+         , Alt "Cons" ["y", "ys"] $
+             LetS (Binding "initXs" $ FAp "init"  ["xs"]) $
+             LetS (Binding "rest"   $ FAp "inits" ["initXs"]) $
+             Simple $ CAp "Cons" ["xs", "rest"]
+         ]
+
+    ,Fun "tails" ["xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             Simple $ CAp "Nil" []
+         , Alt "Cons" ["y", "ys"] $
+             LetS (Binding "rest"   $ FAp "tails" ["ys"]) $
+             Simple $ CAp "Cons" ["xs", "rest"]
+         ]
+
+    ,Fun "map" ["f", "xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         , Alt "Cons" ["y", "ys"] $
+             LetS (Binding "head" $ VAp "f" ["y"]) $
+             LetS (Binding "rest" $ FAp "map" ["f", "ys"]) $
+             Simple $ CAp "Cons" ["head", "rest"]
+         ]
+
+    ,Fun "append" ["xs", "ys"] $
+       Case (SVar "xs")
+         [ Alt "Nil"  [] $ Simple (SVar "ys")
+         , Alt "Cons" ["z", "zs"] $
+             LetS (Binding "rest" $ FAp "append" ["zs", "ys"]) $
+             Simple $ CAp "Cons" ["z", "rest"]
+         ]
+
+    ,Fun "concatMap" ["f", "xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         , Alt "Cons" ["y", "ys"] $
+             LetS (Binding "fy"   $ VAp "f" ["y"]) $
+             LetS (Binding "rest" $ FAp "concatMap" ["f", "ys"]) $
+             Simple $ FAp "append" ["fy", "rest"]
+         ]
+
+    ,Fun "segments" ["xs"] $
+       LetS (Binding "initsXs" $ FAp "inits" ["xs"]) $
+       LetS (Binding "f"       $ FAp "tails" []) $
+       Simple $ FAp "concatMap" ["f", "initsXs"]
+
+    ,Fun "max" ["m", "xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             Simple $ CAp "Int#" ["m"]
+         , Alt "Cons" ["y", "ys"] $
+             If (IntLTE "m" "y")
+               (Simple $ FAp "max" ["y", "ys"])
+               (Simple $ FAp "max" ["m", "ys"])
+         ]
+
+    ,Fun "maximum" ["xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             LetS (Binding "zero" $ Int 0) $
+             Simple $ CAp "Int#" ["zero"]
+         , Alt "Cons" ["y", "ys"] $
+             Simple $ FAp "max" ["y", "ys"]
+         ]
+
+    ,Fun "sumAcc" ["acc", "xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil" [] $
+             Simple $ CAp "Int#" ["acc"]
+         , Alt "Cons" ["y", "ys"] $
+             LetS (Binding "y'" $ POp Plus ["acc", "y"]) $
+             Simple $ FAp "sumAcc" ["y'", "ys"]]
+
+    ,Fun "sum" ["xs"] $
+       LetS (Binding "zero" $ Int 0) $
+       Simple $ FAp "sumAcc" ["zero", "xs"]
+
+    ,Fun "mapSum" ["xs"] $
+       Case (SVar "xs")
+         [ Alt "Nil"  [] $ Simple (CAp "Nil" [])
+         , Alt "Cons" ["y", "ys"] $
+             Case (FAp "sum" ["y"])
+               [ Alt "Int#" ["head"] $
+                   LetS (Binding "rest" $ FAp "mapSum" ["ys"]) $
+                   Simple $ CAp "Cons" ["head", "rest"]
+               ]
+         ]
+
+    ,Fun "mss" ["xs"] $
+       LetS (Binding "segs"  $ FAp "segments" ["xs"]) $
+       LetS (Binding "segss" $ FAp "mapSum" ["segs"]) $
+       --Simple $ SVar "segss"
+       Simple $ FAp "maximum" ["segss"]
+
+    ,Fun "fromTo" ["n", "m"] $
+       If (IntLTE "n" "m")
+         (LetS (Binding "one" $ Int 1) $
+          LetS (Binding "next" $ POp Plus ["one", "n"]) $
+          LetS (Binding "rest" $ FAp "fromTo" ["next", "m"]) $
+          Simple $ CAp "Cons" ["n", "rest"])
+         (Simple $ CAp "Nil" [])
+
+    ,Fun "main" [] $
+       LetS (Binding "iLim"  $ Int   n ) $
+       LetS (Binding "inLim" $ Int (-n)) $
+       LetS (Binding "range" $ FAp "fromTo" ["inLim", "iLim"]) $
+       Simple $ FAp "mss" ["range"]
     ]
 
 -- TODO What about the fixpoint operator?
