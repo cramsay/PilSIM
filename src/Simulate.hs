@@ -703,6 +703,7 @@ eSim = do s <- get
                  , conts
                  , ret )
            is <- selectAlt nodeName cn alts
+           envEmpty [n]
            step $ EvalI is
        where selectAlt nodeName cn ( IAlt (Node (CTag cn') args) code : rest )
                | cn == cn' = do _ <- traverse (\(arg,i) -> envPush arg nodeName (Arg i)) (zip args [0..])
