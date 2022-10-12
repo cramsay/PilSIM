@@ -97,3 +97,10 @@ instance Show Cont where
   show (Apply args) = "Apply " ++ consperse " " args
   show (Select n) = "Select " ++ show n
   show (ICatch n) = "Catch " ++ n
+
+instance Show Terminator where
+  show (Return n  ) = "Return " ++ show n
+  show (Jump ca co) = "Jump " ++ show ca ++ " " ++ show co
+  show (ICase ca co alts) = "Case " ++ show ca ++ " " ++ show co ++ "..."
+  show (IIf cmp t f) = "If " ++ show cmp ++ "..."
+  show (IThrow x   ) = "Throw " ++ show x

@@ -150,6 +150,33 @@ coreSumO2
                  Simple $ FAp "foldrSum" ["i0", "l2"]
     in [foldrSum, sum2]
 
+-- A simple nonsense test for handling of non-strict terms.
+-- Our expression (a+b) should be evaluated only once (and shared in two places)
+-- The expression (c+b) should never be evaluated.
+coreLazyTest
+  = [Fun "plus" ["x", "y"] $ -- Indirection to saturate prim op
+       Case (SVar "x")
+         [ Alt "Int#" ["xi"] $
+             Case (SVar "y")
+               [ Alt "Int#" ["yi"] $
+                   LetS (Binding "zi" $ POp Plus ["xi","yi"]) $
+                   Simple $ CAp "Int#" ["zi"]
+               ]
+         ]
+    ,Fun "foo" ["x", "y"] $
+          Simple $ FAp "plus" ["x", "x"]
+    ,Fun "main" [] $
+          LetS (Binding "ai" $ Int 100) $
+          LetS (Binding "a"  $ CAp "Int#" ["ai"]) $
+          LetS (Binding "bi" $ Int 42 ) $
+          LetS (Binding "b"  $ CAp "Int#" ["bi"]) $
+          LetS (Binding "ci" $ Int 999) $
+          LetS (Binding "c"  $ CAp "Int#" ["ci"]) $
+          Let  (Binding "x"  $ FAp "plus" ["a", "b"]) $
+          Let  (Binding "y"  $ FAp "plus" ["c", "b"]) $
+          Simple $ FAp "foo" ["x", "y"]
+    ]
+
 -- A naive Fibonacci example. All primitives are boxed.
 coreFib n
   = let fib = Fun "fib" ["n"] $
@@ -345,7 +372,7 @@ coreMSS n
                    Simple $ CafAp "cafNil" []
                , Alt "Cons" ["z", "zs"] $
                    LetS (Binding "evaldYs" $ CAp "Cons" ["z", "zs"]) $
-                   LetS (Binding "initRest" $ FAp "init" ["evaldYs"]) $
+                   Let  (Binding "initRest" $ FAp "init" ["evaldYs"]) $
                    Simple $ CAp "Cons" ["y", "initRest"]
                ]
          ]
@@ -357,8 +384,8 @@ coreMSS n
              Simple $ CAp "Cons" ["nil", "nil"] -- Should be a CAF but no full support yet.
          , Alt "Cons" ["y", "ys"] $
              LetS (Binding "evaldXs" $ CAp "Cons" ["y", "ys"]) $
-             Let (Binding "initXs" $ FAp "init"  ["evaldXs"]) $
-             Let (Binding "rest"   $ FAp "inits" ["initXs"]) $
+             Let  (Binding "initXs" $ FAp "init"  ["evaldXs"]) $
+             Let  (Binding "rest"   $ FAp "inits" ["initXs"]) $
              Simple $ CAp "Cons" ["evaldXs", "rest"]
          ]
 
@@ -368,7 +395,7 @@ coreMSS n
              Simple $ CafAp "cafNil" []
          , Alt "Cons" ["y", "ys"] $
              LetS (Binding "evaldXs" $ CAp "Cons" ["y", "ys"]) $
-             Let (Binding "rest"   $ FAp "tails" ["ys"]) $
+             Let  (Binding "rest"   $ FAp "tails" ["ys"]) $
              Simple $ CAp "Cons" ["evaldXs", "rest"]
          ]
 
@@ -393,13 +420,13 @@ coreMSS n
        Case (SVar "xs")
          [ Alt "Nil"  [] $ Simple (CafAp "cafNil" [])
          , Alt "Cons" ["y", "ys"] $
-             LetS (Binding "fy"   $ VAp "f" ["y"]) $
+             Let  (Binding "fy"   $ VAp "f" ["y"]) $
              Let  (Binding "rest" $ FAp "concatMap" ["f", "ys"]) $
              Simple $ FAp "append" ["fy", "rest"]
          ]
 
     ,Fun "segments" ["xs"] $
-       LetS (Binding "initsXs" $ FAp "inits" ["xs"]) $
+       Let  (Binding "initsXs" $ FAp "inits" ["xs"]) $
        Let  (Binding "f"       $ FAp "tails" []) $
        Simple $ FAp "concatMap" ["f", "initsXs"]
 

@@ -93,8 +93,11 @@ resolveNode nname (Node' tag args) = do args' <- traverse toName (zip [0..] args
 data Cont' = Apply' [Atom]
            | Select' Int
            | ICatch' Atom
-           | Update' Atom
+           | Update' Name
   deriving Show
+
+isUpdate (Update' _) = True
+isUpdate _           = False
 
 data Return = RNTo (Node -> Block)
             | RRTo (Name -> Block)
@@ -426,7 +429,7 @@ step m = do stepAccounting m
             dispatch c m
   where
     dispatch c (EvalI (Terminate t))
-      = traceState (banner c "Instr [Terminator]") $ iSim (Terminate t)
+      = traceState (banner c ("T: " ++ show t)) $ iSim (Terminate t)
     dispatch c (EvalI (i :> rest))
       = traceState (banner c ("Instr " ++ show i)) $ iSim (i :> rest)
     dispatch c EvalE
@@ -535,7 +538,10 @@ cSim (Eval x) e r
                        sPush ( [(nname, n)]
                              , e'
                              , r )
-                       --qPush (Ref p) --FIXME we need this to still be called, x, right?
+                       p' <- qPush (Ref p) --Need to push reference on the
+                                           --locals queue to get picked up by
+                                           --Update later.
+                       envPush p' nname Local
                        step EvalE
 
 cSim (EvalCaf g) e r
@@ -567,7 +573,7 @@ cSim (IFix f args) e r
        vals <- mapM envRead args
        nodeName <- newName "fn"
        sPush ( [(nodeName, Node' (FTag f) vals)]
-             , Update' (Ref y) : e'
+             , Update' y : e'
              , r )
        argNames <- cLookupArgs f
        _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
@@ -584,13 +590,16 @@ eSim :: Sim ()
 eSim = do s <- get
           go (heap s) (head $ stack s) (locals s)
   where
-    go h ( [(sname, Node' (FTag f) vals)] , c, r ) ((_,u):qs)
+    go h ( [(sname, Node' (FTag f) vals)] , c, r ) ((_,Ref u):qs)
       = do _ <- sPop
            nodeName <- newName "fn"
            argNames <- cLookupArgs f
            _ <- traverse (\(n,i) -> envPush n nodeName (Arg i)) (zip argNames [0..])
+           let c' = if (any isUpdate c)
+                      then c
+                      else Update' u : c
            sPush ( [(nodeName, Node' (FTag f) vals)]
-                 , c --Update' u : c
+                 , c'
                  , r )
            envEmpty [sname]
            is <- cLookup f
@@ -608,7 +617,7 @@ eSim = do s <- get
            is <- cLookup f
            step $ EvalI is
 
-    go h ( [(name, n)] , Update' (Ref u) : c, r ) _
+    go h ( [(name, n)] , Update' u : c, r ) _
       = do hUpdate u n
            _ <- sPop
            sPush ( [ (name, n) ]
@@ -773,7 +782,7 @@ gcCopyCont (Apply' args) = do _ <- traverse gcCopyAtom args
                               pure ()
 gcCopyCont (Select' _  ) = pure ()
 gcCopyCont (ICatch' a  ) = gcCopyAtom a
-gcCopyCont (Update' a  ) = gcCopyAtom a
+gcCopyCont (Update' a  ) = gcCopyAtom $ Ref a
 
 gcCopyFrame :: StackFrame -> Sim ()
 gcCopyFrame (ns, conts, rets)
