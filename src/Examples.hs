@@ -17,13 +17,15 @@ reportPipelining prog
        putStrLn $ "Cycle types  = " ++ show (statsCollectCycleTypes state)
        putStrLn "----------------------"
 
-guessPerf prog stages clk bubbleMap
+guessPerf prog stages clk scale bubbleMap
   = do let state = run prog
        let cycleCount = fromIntegral . cycles . stats $ state
        let cycleDeps = statsCollectCycleDeps state
-       let withBubs = M.mapWithKey (\k x -> x * (1+(M.findWithDefault 0 k bubbleMap))) cycleDeps
+       let withBubs = M.mapWithKey (\k x -> x * (1+scale*(M.findWithDefault 0 k bubbleMap))) cycleDeps
        let pipelinedCycles = stages + (sum $ M.elems withBubs)/100.0*cycleCount
+       putStrLn $ "Cycles = " ++ show pipelinedCycles
        putStrLn $ "Time = " ++ show (pipelinedCycles / clk)
+       putStrLn $ "Hazards = " ++ show cycleDeps
 
 -- Prelude functions for lazy evaluation.
 -- Could generate more variations of these with TH.

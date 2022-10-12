@@ -21,6 +21,7 @@ data EvalMode = EvalI Block
 data CycleDep
   = CDNothing
   | CDBranch
+  | CDJump
   | CDHazard Int -- There's a data dependency hazard with n cycles between
                  -- allocation (now) and first use point
   deriving (Show, Ord, Eq)
@@ -277,9 +278,9 @@ statsIncCycleType ct cd
 
 statsIncCycleType' :: Call -> CycleType -> Sim ()
 statsIncCycleType' (Eval    x) t = statsIncCycleType t CDBranch
-statsIncCycleType' (EvalCaf g) t = statsIncCycleType t CDNothing
-statsIncCycleType' (TLF  f as) t = statsIncCycleType t CDNothing
-statsIncCycleType' (IFix f as) t = statsIncCycleType t CDNothing
+statsIncCycleType' (EvalCaf g) t = statsIncCycleType t CDBranch
+statsIncCycleType' (TLF  f as) t = statsIncCycleType t CDJump
+statsIncCycleType' (IFix f as) t = statsIncCycleType t CDJump
 
 -- Count instrs before next use
 findUse :: Block -> CycleDep
@@ -361,9 +362,9 @@ logCycleTypeB b@(ICall    ca co :> _) = statsIncCycleType' ca CTCall
 logCycleTypeB b@(Force    ca co :> _) = statsIncCycleType' ca CTForce
 logCycleTypeB (Terminate (Return n)) = statsIncCycleType CTReturn CDBranch
 logCycleTypeB (Terminate (Jump ca co)) = statsIncCycleType' ca CTJump
-logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType' ca CTCase
+logCycleTypeB (Terminate (ICase ca co alts)) = statsIncCycleType CTCase CDBranch
 logCycleTypeB (Terminate (IIf o x y)) = statsIncCycleType CTIf CDBranch
-logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrow CDBranch
+logCycleTypeB (Terminate (IThrow x)) = statsIncCycleType CTThrow CDJump
 
 logCycleType :: EvalMode -> Sim ()
 logCycleType (EvalI b) = logCycleTypeB b
